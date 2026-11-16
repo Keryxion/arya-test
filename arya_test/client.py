@@ -175,6 +175,11 @@ class Client:
                 assert e.get('next_action') in ('listen', 'standby')
                 if t.interrupted:
                     assert e['next_action'] == 'listen'
+                turn_events = [x for x in self.events if x.get('turn_id') == tid]
+                pieces = [x for x in turn_events if x['type'] == 'transcript' and x.get('role') == 'assistant' and not x.get('replay')]
+                if pieces and not t.interrupted and not any(x['type']=='error' for x in turn_events):
+                    assert pieces[-1].get('message_id') and pieces[-1]['text']=='', 'assistant reply missing closing transcript cursor'
+                    assert sum(bool(x.get('message_id')) for x in pieces)==1, 'duplicate assistant closing cursor'
                 t.done = e
                 if self.active_audio == tid:
                     self.active_audio = None

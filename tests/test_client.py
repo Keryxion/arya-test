@@ -37,3 +37,10 @@ def test_codec_accepts_20ms_and_rejects_corruption():
     finally:
         enc.close()
         dec.close()
+
+
+def test_validator_rejects_reply_without_closing_cursor():
+    c=Client('ws://invalid','unused',transcripts=True)
+    c.events.append({'type':'transcript','role':'assistant','turn_id':'a','text':'Hello'})
+    with pytest.raises(AssertionError,match='closing transcript'):
+        c._validate({'type':'turn_done','turn_id':'a','next_action':'standby'},0)
