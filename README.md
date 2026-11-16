@@ -2,7 +2,7 @@
 
 Independent, headless client-contract checks for the **live Penny server**, using
 **model `free`**. This private repository owns the tests; hermes-converse's Crow
-workflow unpacks a pinned source revision and reports the result on each push.
+workflow unpacks a pinned source revision and reports the result after each successful Penny deployment.
 
 The client uses only the documented WebSocket protocol. It imports no server
 modules and mocks no server component. It sends synthesized microphone speech
@@ -48,10 +48,10 @@ byte counts are written to `reports/traces/`; no API key, start-auth frame, raw
 audio, or provider configuration is recorded. Traces contain only test-owned
 conversation output. Crow logs include test failures and the triggering commit.
 
-This is a live-deployment regression check. A commit triggers the check but is
-**not automatically deployed to Penny**. The result does not claim Penny runs
-that commit. Initial inspection found Penny at `7e725ee4ba817adfe62050e396588c0049aaf313`
-and the contract at `a66827433415b702b520c8876c2bcec6cba22231`.
+The hermes-converse check runs on `deployment` events targeting `penny` and
+waits for the `alpha` deployment workflow to succeed. A failed deployment does
+not run the suite. The cloned contract comes from the deployment commit.
+Standalone manual runs test whatever revision Penny is serving.
 
 ## Coverage
 
@@ -80,18 +80,18 @@ to a pass.
 
 ## Crow
 
-`.crow.yaml` runs this repository's tests on pushes and manual runs.
+`.crow.yaml` allows standalone manual runs of this repository's tests.
 `ci/run.sh` is the check entry point. The hermes-converse workflow unpacks a versioned source archive from a masked
 Crow secret and verifies its SHA256. `scripts/publish-crow-bundle.py` publishes
 that archive from a committed suite revision. This avoids handing a public
 repository a broad GitHub credential for a private checkout. Each version has its
 own secret name so older commits continue to test the revision they pin. The `arya_penny_api_key` secret is needed on each Crow repository,
-limited to `push` and `manual` events. Fork pull requests do not receive it.
+limited to `deployment` on hermes-converse and `manual` on arya-test.
+Source-bundle secrets on hermes-converse allow only `deployment`.
 
 Useful operator commands:
 
 ```sh
 crow --disable-update-check lint .crow.yaml
 crow --disable-update-check pipeline create Keryxion/arya-test --branch main
-crow --disable-update-check pipeline create Keryxion/hermes-converse --branch main
 ```
