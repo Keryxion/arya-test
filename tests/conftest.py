@@ -34,4 +34,11 @@ async def client(live_config, request):
     (destination/(name+'.json')).write_text(json.dumps({'test':request.node.nodeid,
         'connections':[{'events':c.events,'offending_frame':c.offending_frame,'failure':str(c.failure) if c.failure else None,
         'audio_bytes':{tid:len(t.pcm) for tid,t in c.turns.items()}} for c in clients]}, indent=2))
-    assert not failures, '; '.join(failures)
+    if getattr(request.node, 'rep_call', None) is None or request.node.rep_call.passed:
+        assert not failures, '; '.join(failures)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    setattr(item, 'rep_' + call.when, outcome.get_result())

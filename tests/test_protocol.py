@@ -259,3 +259,53 @@ async def test_title_command_keeps_socket(client):
 async def test_transcripts_boolean_opt_in(client):
     c=await client(transcripts='true')
     assert c.ready['transcripts'] is False
+
+
+@pytest.mark.parametrize('rank', ['confidence','volume','heard_at','arrival'])
+async def test_wake_ranking_when_enabled_and_grants_when_disabled(client, rank):
+    a,b=await client(),await client()
+    # Arrival is also the final tie-break; all other tiers can select the later claimant.
+    sa=dict(confidence=.5,volume=.2,heard_at=1000)
+    sb=dict(sa)
+    if rank=='confidence': sb['confidence']=.9
+    if rank=='volume': sb['volume']=.8
+    if rank=='heard_at': sb['heard_at']=500
+    await a.send(type='wake',claim_id='rank-a',wake_word='Hey Arya',**sa)
+    await b.send(type='wake',claim_id='rank-b',wake_word='Hey Arya',**sb)
+    async def decision(c,claim):
+        async with asyncio.timeout(1):
+            while True:
+                c.changed.clear()
+                if c.failure: raise c.failure
+                frames=[e for e in c.events if e.get('claim_id')==claim and e['type'] in ('wake_grant','wake_deny')]
+                if frames: return frames[0]['type']
+                await c.changed.wait()
+    da,db=await asyncio.gather(decision(a,'rank-a'),decision(b,'rank-b'))
+    # The contract permits arbitration to be disabled. All grants are valid then.
+    if (da,db)!=('wake_grant','wake_grant'):
+        assert (da,db)==(('wake_grant','wake_deny') if rank=='arrival' else ('wake_deny','wake_grant'))
+    for c,claim in [(a,'rank-a'),(b,'rank-b')]:
+        await c.quiet_for(.2,{'thinking','transcript','interrupted'})
+        assert sum(e.get('claim_id')==claim for e in c.events)==1
+
+
+async def test_opus_non_twenty_ms_rejected(client):
+    import ctypes as C
+    c=await client(audio_format='opus')
+    enc=c.encoder
+    output=C.create_string_buffer(4000)
+    n=enc.lib.opus_encode(enc.ptr,bytes(320),160,output,4000)  # 10ms at 16kHz
+    assert n>0
+    await c.ws.send_bytes(output.raw[:n])
+    await c.wait('error',error='bad_audio')
+    await asyncio.wait_for(c.reader,10)
+    assert c.ws.close_code==4400
+
+
+async def test_reset_command_alias(client):
+    c=await client()
+    await c.send(type='command',name='reset')
+    e=await c.wait('command',name='reset')
+    assert isinstance(e.get('reply'),str)
+    await asyncio.wait_for(c.reader,10)
+    assert c.ws.close_code==4410

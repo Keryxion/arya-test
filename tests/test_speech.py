@@ -19,7 +19,7 @@ async def test_say_idle_output_and_drain(client, fmt):
     assert not any(e['type'] in ('wake_grant','wake_deny') for e in c.events)
     offset=len(c.events)
     await c.send(type='say',text='Second reply after playback drained.')
-    again=await c.finish(offset)
+    again=await c.finish(offset,user=c.start.get("transcripts") is True)
     assert again['turn_id']!=done['turn_id']
 
 
@@ -27,14 +27,14 @@ async def test_say_idle_output_and_drain(client, fmt):
 async def test_real_voice_turn_commit_and_followup(client, fmt):
     c=await client(audio_format=fmt,transcripts=True)
     offset=await c.utterance('Arya, what is two plus two? Answer briefly. Do not use any tools.')
-    done=await c.finish(offset)
+    done=await c.finish(offset,user=c.start.get("transcripts") is True)
     assert done['next_action']=='listen'
     messages=[e for e in c.events[offset:] if e['type']=='transcript']
     assert any(e['role']=='user' and e['text'] for e in messages)
     assert any(e['role']=='assistant' and e.get('message_id') and e['text']=='' for e in messages)
     assert any(word in assistant_text(c,offset).lower() for word in ('four','4')), 'free model reply did not answer input'
     offset=await c.utterance('What was the arithmetic question I just asked you? Answer briefly without tools.')
-    other=await c.finish(offset)
+    other=await c.finish(offset,user=c.start.get("transcripts") is True)
     assert other['turn_id']!=done['turn_id']
     assert any(word in assistant_text(c,offset).lower() for word in ('two','2','plus')), 'history reply: '+assistant_text(c,offset)
 
@@ -42,7 +42,7 @@ async def test_real_voice_turn_commit_and_followup(client, fmt):
 async def test_automatic_endpoint_and_transcripts_off(client):
     c=await client()
     offset=await c.utterance('Arya, say hello briefly without tools.',commit=False)
-    await c.finish(offset)
+    await c.finish(offset,user=c.start.get("transcripts") is True)
     assert not any(e['type']=='transcript' for e in c.events)
 
 
@@ -57,7 +57,7 @@ async def test_cancel_preserves_socket_and_next_turn(client):
     assert done['next_action']=='listen'
     await c.send(type='state',turn_id=tid,state='listening')
     offset=await c.utterance('Arya, say hello. Do not use tools.')
-    next_done=await c.finish(offset)
+    next_done=await c.finish(offset,user=c.start.get("transcripts") is True)
     assert next_done['turn_id']!=tid and not c.closed
 
 
@@ -83,7 +83,7 @@ async def test_model_change_during_turn_keeps_audio(client):
 async def test_history_reconnect_cursor_and_stop(client):
     c=await client(transcripts=True)
     offset=await c.utterance('Arya, remember the secret word is pineapple. Repeat the word briefly without tools.')
-    await c.finish(offset)
+    await c.finish(offset,user=c.start.get("transcripts") is True)
     user=next(e for e in c.events if e['type']=='transcript' and e.get('role')=='user')
     closing=next(e for e in reversed(c.events) if e['type']=='transcript' and e.get('role')=='assistant' and e.get('message_id'))
     await c.send(stop=True)
@@ -95,7 +95,7 @@ async def test_history_reconnect_cursor_and_stop(client):
     assert not any(e.get('message_id')==user['message_id'] for e in b.events)
     assert not any(e['type']=='speaking' for e in b.events), 'history replay was spoken'
     offset=await b.utterance('What secret word did I ask you to remember? No tools, answer briefly.')
-    await b.finish(offset)
+    await b.finish(offset,user=True)
     assert 'pineapple' in assistant_text(b,offset).lower(), 'history lost on stop/reconnect'
 
 
@@ -133,17 +133,58 @@ async def test_countdown_create_replay_and_cancel(client):
     c=await client(transcripts=True)
     try:
         offset=await c.utterance('Arya, set a countdown timer for three minutes called contract check. Use the countdown tool.')
-        await c.finish(offset)
+        await c.finish(offset,user=c.start.get("transcripts") is True)
         alarm=await c.wait('countdown',after=offset,timeout=10)
         await c.close()
         b=await client(device=c.start['device_name'],transcripts=True)
         await b.wait('countdown',countdown_id=alarm['countdown_id'])
         c=b
         offset=await c.utterance('Arya, cancel my contract check countdown timer. Use the countdown tool.')
-        await c.finish(offset)
+        await c.finish(offset,user=c.start.get("transcripts") is True)
         await c.wait('countdown_cancel',after=offset,countdown_id=alarm['countdown_id'],timeout=10)
     finally:
         # Test-owned countdown only; ended removes it even if the model did not cancel.
+        for e in c.events:
+            if e['type']=='countdown' and not c.closed:
+                await c.send(type='countdown',countdown_id=e['countdown_id'],ended=True)
+
+
+async def test_disconnect_does_not_cancel_active_turn(client):
+    c=await client(transcripts=True)
+    offset=await c.utterance('Arya, explain why the sky is blue in two sentences. Do not use tools.')
+    user=await c.wait('transcript',after=offset,role='user')
+    tid=user['turn_id']
+    await c.stop_ambient()
+    await c.ws.close()  # An actual drop, not the stop control.
+    await c.reader
+    b=await client(device=c.start['device_name'],transcripts=True,after=user['message_id'])
+    assert b.ready['new_session'] is False
+    async with asyncio.timeout(160):
+        while True:
+            b.changed.clear()
+            if b.failure: raise b.failure
+            reply=[e for e in b.events if e['type']=='transcript' and e.get('role')=='assistant' and e.get('message_id')]
+            if reply: break
+            await b.changed.wait()
+    # Finished work replays silently; still-running work resumes under its turn ID.
+    if reply[-1].get('replay'):
+        assert reply[-1]['text']
+    else:
+        assert reply[-1]['turn_id']==tid
+        await b.wait('turn_done',turn_id=tid,timeout=160)
+
+
+async def test_countdown_extension_preserves_id(client):
+    c=await client(transcripts=True)
+    try:
+        offset=await c.utterance('Arya, set a countdown timer for three minutes called tea test. Use the countdown tool.')
+        await c.finish(offset,user=True)
+        alarm=await c.wait('countdown',after=offset,timeout=10)
+        offset=await c.utterance('Arya, extend my existing tea test countdown timer by five minutes. Do not create a second timer.')
+        await c.finish(offset,user=True)
+        extended=await c.wait('countdown',after=offset,countdown_id=alarm['countdown_id'],timeout=10)
+        assert extended['deadline_unix_ms']>alarm['deadline_unix_ms']
+    finally:
         for e in c.events:
             if e['type']=='countdown' and not c.closed:
                 await c.send(type='countdown',countdown_id=e['countdown_id'],ended=True)

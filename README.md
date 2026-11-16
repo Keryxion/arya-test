@@ -2,7 +2,7 @@
 
 Independent, headless client-contract checks for the **live Penny server**, using
 **model `free`**. This private repository owns the tests; hermes-converse's Crow
-workflow checks out a pinned revision and reports the result on each push.
+workflow unpacks a pinned source revision and reports the result on each push.
 
 The client uses only the documented WebSocket protocol. It imports no server
 modules and mocks no server component. It sends synthesized microphone speech
@@ -65,13 +65,14 @@ and the contract at `a66827433415b702b520c8876c2bcec6cba22231`.
 | §6–7 flow and IDs | Real automatic endpointing and forced endpointing, repeated turns, turn correlation |
 | §8 wake | Correlated one-second decisions, exact phrase separation, invalid requests/signals; streaming without a wake claim |
 | §9 outbound audio | Idle `say`, no synthetic user/wake event, standby, subsequent output after drain |
-| §10 countdowns | Real model-created countdown, fields/sounds, replay on reconnect, model cancellation, test-owned cleanup |
+| §10 countdowns | Real model-created countdown, fields/sounds, replay on reconnect, model cancellation/extension, test-owned cleanup |
 | §11 model | Catalog opt-in, display-only fields, free availability/selection, invalid IDs/choices, reset, selection during playback |
 
 Frame validation also checks approval requests/resolutions and tones whenever
 emitted. The suite does **not yet force** approval expiry/reconnect, provider
 failure/stall, deletion of a conversation from Hermes, scheduled outbound work,
-ranked multi-device wake tie-breaks, or countdown snooze/multiple ringing. These
+countdown snooze/multiple ringing. Ranked wake tie-breaks are checked when
+Penny enables selection; disabled selection is checked for grants instead. These
 remain coverage gaps, not passing evidence for those requirements. Model/STT
 semantic assertions can fail because the live model or transcription failed;
 the trace distinguishes that from a protocol failure. No retry converts a failure
@@ -80,9 +81,11 @@ to a pass.
 ## Crow
 
 `.crow.yaml` runs this repository's tests on pushes and manual runs.
-`ci/run.sh` is the check entry point. The hermes-converse workflow uses Crow's
-trusted clone plugin for the private checkout; it never stores a GitHub token in
-this repository. The `arya_penny_api_key` secret is needed on each Crow repository,
+`ci/run.sh` is the check entry point. The hermes-converse workflow unpacks a versioned source archive from a masked
+Crow secret and verifies its SHA256. `scripts/publish-crow-bundle.py` publishes
+that archive from a committed suite revision. This avoids handing a public
+repository a broad GitHub credential for a private checkout. Each version has its
+own secret name so older commits continue to test the revision they pin. The `arya_penny_api_key` secret is needed on each Crow repository,
 limited to `push` and `manual` events. Fork pull requests do not receive it.
 
 Useful operator commands:

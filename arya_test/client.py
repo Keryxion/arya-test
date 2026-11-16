@@ -22,6 +22,7 @@ class Turn:
     first_audio: float | None = None
     speaker_until: float = 0
     decoder: Opus | None = None
+    drained: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class Client:
@@ -107,6 +108,7 @@ class Client:
                     assert len(t.pcm)/(rate*2) <= now-t.first_audio+2.25, 'server audio exceeds playback lead'
                     t.speaker_until = max(now, t.speaker_until) + len(pcm)/(rate*2)
                 elif msg.type == aiohttp.WSMsgType.TEXT:
+                    assert self.key not in msg.data, 'server echoed API credential'
                     e = json.loads(msg.data)
                     assert isinstance(e, dict) and isinstance(e.get('type'), str), 'invalid JSON frame'
                     self.offending_frame = e
@@ -115,6 +117,8 @@ class Client:
                     self.events.append(e)
                     if e['type'] == 'speaking':
                         await self.send(type='state', turn_id=e['turn_id'], state='speaking')
+                    if e['type'] == 'turn_done':
+                        self.tasks.append(asyncio.create_task(self._drain(e['turn_id'])))
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     raise AssertionError('WebSocket transport failure')
                 self.changed.set()
@@ -174,6 +178,9 @@ class Client:
                 t.done = e
                 if self.active_audio == tid:
                     self.active_audio = None
+        if kind == 'error':
+            assert isinstance(e.get('error'), str) and e['error'], 'missing spoken-safe error'
+            assert 'Traceback (most recent call last)' not in e['error'], 'internal traceback exposed'
         if kind == 'countdown':
             assert isinstance(e.get('countdown_id'), str) and e['countdown_id']
             assert type(e.get('deadline_unix_ms')) in (int, float)
@@ -245,16 +252,29 @@ class Client:
                 await self.ambient
             self.ambient = None
 
-    async def finish(self, offset=0, audio=True):
-        done = await self.wait('turn_done', after=offset, timeout=160)
+    async def _drain(self, tid):
+        t = self.turns[tid]
+        try:
+            await asyncio.sleep(max(0, t.speaker_until-time.monotonic()))
+            if not self.closed:
+                await self.send(type='state', turn_id=tid,
+                                state='listening' if t.done['next_action']=='listen' else 'standby')
+        finally:
+            t.drained.set()
+
+    async def finish(self, offset=0, audio=True, user=False):
+        fields = {}
+        if user:
+            transcript = await self.wait('transcript', after=offset, role='user', timeout=60)
+            fields['turn_id'] = transcript['turn_id']
+        done = await self.wait('turn_done', after=offset, timeout=160, **fields)
         tid = done['turn_id']
         t = self.turns[tid]
         errors = [e for e in self.events[offset:] if e['type'] == 'error' and e.get('turn_id') == tid]
         assert not errors, 'live turn returned an error'
         if audio:
             assert len(t.pcm) > 0 and any(t.pcm), 'no audible reply PCM'
-        await asyncio.sleep(max(0, t.speaker_until-time.monotonic()))
-        await self.send(type='state', turn_id=tid, state='listening' if done['next_action']=='listen' else 'standby')
+        await asyncio.wait_for(t.drained.wait(), 160)
         if done['next_action'] == 'standby':
             await self.stop_ambient()
         return done
@@ -267,6 +287,9 @@ class Client:
             await self.ws.close()
         if self.reader:
             await self.reader
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
         if self.encoder:
             self.encoder.close()
         for t in self.turns.values():
