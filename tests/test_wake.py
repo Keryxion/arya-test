@@ -1,6 +1,7 @@
 """Live server wire checks. These do not test physical wake detectors."""
 import pytest
 from arya_test.wake import verify_models
+from tests.test_speech import assistant_text
 
 pytestmark = pytest.mark.live
 
@@ -30,11 +31,19 @@ async def test_wake_result_frame_keeps_connection_usable(client, error):
 @pytest.mark.speech
 async def test_live_set_wake_word_reports_failure_on_same_socket(client):
     c = await client(transcripts=True)
-    offset = await c.utterance('Use the set wake word tool now to change this device wake word to Hey Sakura. Do not just describe how.')
+    previous = c.ready['wake_word']['phrase']
+    target = 'Hey Arya' if previous != 'Hey Arya' else 'Hey Sakura'
+    offset = await c.utterance(f'Change my wake word to {target}. Call the set wake word tool to do it. Give a very brief reply after the tool finishes.')
     command = await c.wait('set_wake_word', after=offset, timeout=120)
-    assert command['phrase'] == 'Hey Sakura'
+    assert command['phrase'] == target
     await verify_models(c.http, c.url, c.key, command)
     # This exercises a real server command/result round trip. No physical loading claimed.
     await c.send(type='wake_word_set', phrase=command['phrase'], status='error', error='load_failed')
-    await c.finish(offset)
+    done = await c.finish(offset)
+    reply = assistant_text(c, offset, turn_id=done['turn_id']).lower()
+    assert any(word in reply for word in ('fail', 'unable', 'could not', "couldn't", 'cannot', 'not changed')), 'model did not report the failed switch'
     await c.select_free()
+    device = c.start['device_name']
+    await c.close()
+    reconnected = await client(device=device)
+    assert reconnected.ready['wake_word']['phrase'] == previous, 'failed switch was persisted'

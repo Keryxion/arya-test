@@ -127,7 +127,7 @@ hash covers the manifest; it does not advertise a separate TFLite hash.
 
 Live result checks send all four documented error values and confirm the socket
 remains usable. A speech test asks the real `free` model to change the test-owned
-device's phrase, validates the resulting `set_wake_word`, and reports `load_failed`
+device's phrase to a different one, validates the resulting `set_wake_word`, and reports `load_failed`
 on that socket. It fails if the model does not invoke the tool. There is no
 undocumented tool-invocation or configuration endpoint in this harness.
 
@@ -138,3 +138,5 @@ switches, rollback, the 30-second response deadline, cache reuse, and persistenc
 across restart. Local HTTP corruption/authentication tests are negative controls
 for the harness, not evidence for physical client behavior. The exact spec
 snapshot comparison and all earlier contract tests remain in place.
+
+Measured results and remaining failures: [wake-word validation](docs/wake-word-132-validation.md).
