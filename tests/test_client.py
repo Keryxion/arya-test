@@ -16,7 +16,7 @@ def test_validator_rejects_wrong_order_and_missing_ids():
 def test_validator_rejects_false_completion_and_liveness_after_done():
     c=Client('ws://invalid','unused')
     with pytest.raises(AssertionError):
-        c._validate({'type':'turn_done','turn_id':'a'},0)
+        c._validate({'type':'turn_done','turn_id':'a','next_action':'invalid'},0)
     c._validate({'type':'turn_done','turn_id':'a','next_action':'listen'},0)
     with pytest.raises(AssertionError,match='terminal'):
         c._validate({'type':'thinking','turn_id':'a','tool_calls':0,'reasoning_tokens':None},0)
@@ -44,3 +44,173 @@ def test_validator_rejects_reply_without_closing_cursor():
     c.events.append({'type':'transcript','role':'assistant','turn_id':'a','text':'Hello'})
     with pytest.raises(AssertionError,match='closing transcript'):
         c._validate({'type':'turn_done','turn_id':'a','next_action':'standby'},0)
+
+
+def emit(c, **frame):
+    c._validate(frame, 0)
+    c.events.append(frame)
+
+
+@pytest.mark.parametrize('action', [None, 'listen', 'standby', 'mute'])
+def test_completion_actions(action):
+    c=Client('ws://invalid','unused')
+    frame=dict(type='turn_done',turn_id='a')
+    if action is not None: frame['next_action']=action
+    emit(c,**frame)
+
+
+@pytest.mark.parametrize('terminal', ['interrupted', 'error'])
+def test_terminal_failure_cannot_change_interaction(terminal):
+    c=Client('ws://invalid','unused')
+    emit(c,type=terminal,turn_id='a',**({'error':'failed'} if terminal=='error' else {}))
+    with pytest.raises(AssertionError,match='carries action'):
+        emit(c,type='turn_done',turn_id='a',next_action='listen')
+    emit(c,type='turn_done',turn_id='a')
+
+
+@pytest.mark.parametrize('kind', ['thinking','transcript','state','speaking'])
+def test_no_turn_frames_after_interruption(kind):
+    c=Client('ws://invalid','unused',transcripts=True)
+    emit(c,type='interrupted',turn_id='old')
+    with pytest.raises(AssertionError):
+        emit(c,type=kind,turn_id='old')
+    with pytest.raises(AssertionError,match='before interrupted'):
+        emit(c,type='state',turn_id='new',state='thinking')
+    emit(c,type='turn_done',turn_id='old')
+    emit(c,type='thinking',turn_id='new',tool_calls=0,reasoning_tokens=None)
+
+
+def test_user_transcript_needs_persisted_id_and_thinking():
+    c=Client('ws://invalid','unused',transcripts=True)
+    frame=dict(type='transcript',turn_id='a',role='user',text='hello')
+    with pytest.raises(AssertionError,match='message_id'):
+        emit(c,**frame)
+    frame['message_id']='m1'
+    with pytest.raises(AssertionError,match='before thinking'):
+        emit(c,**frame)
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    emit(c,**frame)
+
+
+def test_cancel_before_persistence_needs_no_transcript():
+    c=Client('ws://invalid','unused',transcripts=True)
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    emit(c,type='interrupted',turn_id='a')
+    emit(c,type='turn_done',turn_id='a')
+
+
+def test_say_does_not_emit_transcripts():
+    c=Client('ws://invalid','unused',transcripts=True)
+    c.transient_turns.add(None)
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    with pytest.raises(AssertionError,match='say emitted'):
+        emit(c,type='transcript',turn_id='a',role='assistant',text='hello')
+
+
+def test_reconnect_snapshot_and_carried_counters():
+    c=Client('ws://invalid','unused',transcripts=True,
+             resume=dict(turn_id='a',tool_calls=3,reasoning_tokens=100))
+    emit(c,type='transcript',turn_id='a',role='assistant',text='Hello',replay=True)
+    assert c.snapshot_turn=='a'
+    with pytest.raises(AssertionError,match='before state'):
+        emit(c,type='thinking',turn_id='a',tool_calls=3,reasoning_tokens=100)
+    emit(c,type='state',turn_id='a',state='thinking')
+    with pytest.raises(AssertionError,match='counter reset'):
+        emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    emit(c,type='thinking',turn_id='a',tool_calls=3,reasoning_tokens=100)
+    emit(c,type='transcript',turn_id='a',role='assistant',text=' world')
+    emit(c,type='transcript',turn_id='a',role='assistant',text='',message_id='m1')
+    emit(c,type='turn_done',turn_id='a')
+
+
+def test_cursorless_replay_only_for_running_assistant():
+    c=Client('ws://invalid','unused',transcripts=True)
+    with pytest.raises(AssertionError,match='user replay'):
+        emit(c,type='transcript',turn_id='a',role='user',text='hello',replay=True)
+
+
+@pytest.mark.parametrize('requested,expected', [('24000',16000),(16000.0,16000),(True,16000),(7999,8000),(96000,48000)])
+def test_ready_uses_negotiated_pcm_rate(requested,expected):
+    c=Client('ws://invalid','unused',input_rate=requested)
+    c.ready=dict(session_id='s',recipient_id='r',assistant_name='Arya',device_name=c.start['device_name'],
+                 transcripts=False,input=dict(sample_rate=expected,format='pcm16',block_ms=30),
+                 output=dict(sample_rate=24000,format='pcm16'),server_recv_unix_ms=1,server_send_unix_ms=2)
+    c._validate_ready()
+    assert c.start['input_rate']==expected
+
+
+def test_audio_is_rejected_after_interruption():
+    c=Client('ws://invalid','unused')
+    emit(c,type='speaking',turn_id='a')
+    emit(c,type='interrupted',turn_id='a')
+    with pytest.raises(AssertionError,match='audio between interruption'):
+        c._audio(b'\1\0',0)
+    emit(c,type='turn_done',turn_id='a')
+    with pytest.raises(AssertionError,match='binary before speaking'):
+        c._audio(b'\1\0',0)
+
+
+def test_resumed_reply_needs_thinking_before_live_text():
+    c=Client('ws://invalid','unused',transcripts=True)
+    emit(c,type='transcript',turn_id='a',role='assistant',text='Hello',replay=True)
+    emit(c,type='state',turn_id='a',state='speaking')
+    with pytest.raises(AssertionError,match='before state and thinking'):
+        emit(c,type='transcript',turn_id='a',role='assistant',text='world')
+
+
+@pytest.mark.parametrize('action,activation,expected', [(None,True,True),(None,False,False),('standby',True,False),('listen',False,True)])
+async def test_playback_drain_preserves_or_changes_activation(action,activation,expected):
+    c=Client('ws://invalid','unused')
+    sent=[]
+    async def send(**frame): sent.append(frame)
+    c.send=send
+    c.activation=activation
+    frame=dict(type='turn_done',turn_id='a')
+    if action: frame['next_action']=action
+    emit(c,**frame)
+    await c._drain('a')
+    assert c.activation is expected
+    assert sent[-1]['state']==('listening' if expected else 'standby')
+
+
+def test_reply_text_precedes_first_audio():
+    c=Client('ws://invalid','unused',transcripts=True)
+    emit(c,type='speaking',turn_id='a')
+    with pytest.raises(AssertionError,match='before live transcript'):
+        c._audio(b'\1\0',1)
+    emit(c,type='transcript',role='assistant',turn_id='a',text='Hello')
+    c._audio(b'\1\0',1)
+
+
+def test_resumed_text_also_needs_a_closing_cursor():
+    c=Client('ws://invalid','unused',transcripts=True)
+    emit(c,type='transcript',role='assistant',turn_id='a',text='Hello',replay=True)
+    emit(c,type='state',turn_id='a',state='thinking')
+    emit(c,type='thinking',turn_id='a',tool_calls=2,reasoning_tokens=None)
+    with pytest.raises(AssertionError,match='closing transcript'):
+        emit(c,type='turn_done',turn_id='a')
+
+
+@pytest.mark.parametrize('code,error,fmt,expected', [
+    (4503,'audio_unavailable','opus','unavailable'),
+    (4404,'conversation_unavailable','opus','failure'),
+    (4404,'audio_unavailable','opus','failure'),
+    (4503,'audio_unavailable','pcm16','failure'),
+])
+async def test_only_documented_optional_codec_refusal_is_unavailable(code,error,fmt,expected):
+    from types import SimpleNamespace
+    from arya_test.client import AudioUnavailable
+    c=Client('ws://invalid','unused',audio_format=fmt)
+    c.closed=True
+    c.ws=SimpleNamespace(close_code=code)
+    c.events=[dict(type='error',error=error)]
+    with pytest.raises(AudioUnavailable if expected=='unavailable' else AssertionError):
+        await c.wait('ready')
+
+
+def test_replay_comparison_excludes_unrelated_outbound_turns():
+    from tests.test_speech import assistant_text
+    c=Client('ws://invalid','unused',transcripts=True)
+    c.events=[dict(type='transcript',role='assistant',turn_id='answer',text='Four.'),
+              dict(type='transcript',role='assistant',turn_id='notice',text='Unrelated notice.')]
+    assert assistant_text(c,turn_id='answer')=='Four.'

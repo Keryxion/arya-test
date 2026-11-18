@@ -32,8 +32,11 @@ python3 scripts/local-live.py --junitxml=reports/junit.xml
 ```
 
 This reads the API key over SSH into process memory, never printing or saving it.
-No live test silently skips for missing credentials, codecs, models, or services.
-Tests fail when a documented feature cannot be exercised. The local harness
+Missing credentials, models, services, or undocumented codec errors fail the check.
+A valid `4503 audio_unavailable` explicitly declines optional Opus; the setup
+check passes only for that exact error/close pair or negotiated Opus. Opus-only
+packet/playback cases then report explicit skips, while PCM fallback is checked.
+A `4404` Opus setup error remains a failure. The local harness
 negative controls run without credentials: `python -m pytest tests/test_client.py`.
 
 ## Contract and reports
@@ -58,9 +61,9 @@ Standalone manual runs test whatever revision Penny is serving.
 | Contract | Executed checks |
 | --- | --- |
 | §1 authentication | Both auth paths, secret subprotocol not echoed, missing/bad keys, invalid first JSON/binary frames |
-| §2 start and reconnect | Required/forbidden names, PCM and Opus rate matrix, invalid codec/rates, ready identities/timestamps, malformed Opus, attachment replacement, reconnect identity |
-| §3 controls/commands | Stop, commit/empty commit, current/stale cancellation, command catalog, invalid/unknown commands, title/new, say/empty say |
-| §4 lifecycle/transcripts | Real speech and synthetic outbound speech, turn IDs, state, ordered audio, pacing, liveness counters, opt-in transcripts, assistant closing cursor, history and replay, no replay speech, barge-in |
+| §2 start and reconnect | Required/forbidden names, PCM and Opus rate matrix, invalid codec/rates, ready identities/timestamps, malformed Opus, 4503 refusal/PCM fallback, name/rate validation, attachment replacement, reconnect identity |
+| §3 controls/commands | Exact-true stop/commit, empty commit, cancellation during capture and current/stale cancellation, command catalog, invalid/unknown commands, title/new, say/empty say |
+| §4 lifecycle/transcripts | Real speech and synthetic outbound speech, turn IDs, optional listen/standby/mute actions, ordered interruption/audio, text before audio, pacing, carried reconnect counters/text snapshot, opt-in transcripts, closing cursor, history/replay identity, barge-in |
 | §5 silence | No wall-clock quiet, quiet from received samples |
 | §6–7 flow and IDs | Real automatic endpointing and forced endpointing, repeated turns, turn correlation |
 | §8 wake | Correlated one-second decisions, exact phrase separation, invalid requests/signals; streaming without a wake claim |
@@ -95,3 +98,18 @@ Useful operator commands:
 crow --disable-update-check lint .crow.yaml
 crow --disable-update-check pipeline create Keryxion/arya-test --branch main
 ```
+
+## Contract update #173
+
+The snapshot and assertions target hermes-converse `76e1f3c` (merged #173).
+Normal completions may omit `next_action`; errors/interruption must omit it.
+The headless client preserves its activation across absent actions, honors
+explicit listen/standby, and stops upstream audio immediately for mute.
+User transcripts require stored IDs and thinking before them. `say` has no
+transcripts; persisted server replies require closing cursors. Reconnect text
+snapshots are display-only, without cursors; resumed state precedes thinking,
+and counters carry over. Text must precede reply audio when transcripts are on.
+
+Penny's revision is recorded with live results. A server that has not deployed
+this contract is still checked against it, with deployment lag stated separately
+from harness failures. See `docs/contract-173-validation.md` for measured results.

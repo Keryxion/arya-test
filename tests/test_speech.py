@@ -5,13 +5,13 @@ import pytest
 pytestmark = [pytest.mark.live, pytest.mark.speech]
 
 
-def assistant_text(c, offset=0):
-    return ''.join(e['text'] for e in c.events[offset:] if e['type']=='transcript' and e.get('role')=='assistant')
+def assistant_text(c, offset=0, turn_id=None):
+    return ''.join(e['text'] for e in c.events[offset:] if e['type']=='transcript' and e.get('role')=='assistant' and (turn_id is None or e.get('turn_id')==turn_id))
 
 
 @pytest.mark.parametrize('fmt', ['pcm16','opus'])
 async def test_say_idle_output_and_drain(client, fmt):
-    c = await client(audio_format=fmt)
+    c = await client(audio_format=fmt,transcripts=True)
     await c.send(type='say',text='  Arya contract check.  ')
     done = await c.finish()
     assert done['next_action']=='standby'
@@ -19,7 +19,7 @@ async def test_say_idle_output_and_drain(client, fmt):
     assert not any(e['type'] in ('wake_grant','wake_deny') for e in c.events)
     offset=len(c.events)
     await c.send(type='say',text='Second reply after playback drained.')
-    again=await c.finish(offset,user=c.start.get("transcripts") is True)
+    again=await c.finish(offset)
     assert again['turn_id']!=done['turn_id']
 
 
@@ -28,7 +28,7 @@ async def test_real_voice_turn_commit_and_followup(client, fmt):
     c=await client(audio_format=fmt,transcripts=True)
     offset=await c.utterance('Arya, what is two plus two? Answer briefly. Do not use any tools.')
     done=await c.finish(offset,user=c.start.get("transcripts") is True)
-    assert done['next_action']=='listen'
+    assert 'next_action' not in done
     messages=[e for e in c.events[offset:] if e['type']=='transcript']
     assert any(e['role']=='user' and e['text'] for e in messages)
     assert any(e['role']=='assistant' and e.get('message_id') and e['text']=='' for e in messages)
@@ -54,7 +54,7 @@ async def test_cancel_preserves_socket_and_next_turn(client):
     await c.send(type='cancel',turn_id=tid)
     await c.wait('interrupted',turn_id=tid)
     done=await c.wait('turn_done',turn_id=tid)
-    assert done['next_action']=='listen'
+    assert 'next_action' not in done
     await c.send(type='state',turn_id=tid,state='listening')
     offset=await c.utterance('Arya, say hello. Do not use tools.')
     next_done=await c.finish(offset,user=c.start.get("transcripts") is True)
@@ -92,6 +92,8 @@ async def test_history_reconnect_cursor_and_stop(client):
     assert b.ready['new_session'] is False
     replay=await b.wait('transcript',replay=True,message_id=closing['message_id'])
     assert replay['role']=='assistant' and replay['text']
+    assert replay['turn_id']==closing['turn_id']
+    assert replay['text']==assistant_text(c,turn_id=closing['turn_id'])
     assert not any(e.get('message_id')==user['message_id'] for e in b.events)
     assert not any(e['type']=='speaking' for e in b.events), 'history replay was spoken'
     offset=await b.utterance('What secret word did I ask you to remember? No tools, answer briefly.')
@@ -112,7 +114,7 @@ async def test_barge_in_captures_continuation(client):
     second_offset=await c.utterance('Actually, what is three plus three? Answer briefly, without tools.')
     await c.wait('interrupted',turn_id=first['turn_id'],timeout=40)
     old=await c.wait('turn_done',turn_id=first['turn_id'],timeout=40)
-    assert old['next_action']=='listen'
+    assert 'next_action' not in old
     await c.send(type='state',turn_id=first['turn_id'],state='listening')
     # Select the new turn specifically; never mistake the old completion for success.
     async with asyncio.timeout(160):
@@ -154,10 +156,12 @@ async def test_disconnect_does_not_cancel_active_turn(client):
     offset=await c.utterance('Arya, explain why the sky is blue in two sentences. Do not use tools.')
     user=await c.wait('transcript',after=offset,role='user')
     tid=user['turn_id']
+    await c.wait('transcript',after=offset,role='assistant',turn_id=tid,timeout=120)
     await c.stop_ambient()
     await c.ws.close()  # An actual drop, not the stop control.
     await c.reader
-    b=await client(device=c.start['device_name'],transcripts=True,after=user['message_id'])
+    b=await client(device=c.start['device_name'],transcripts=True,after=user['message_id'],
+                   resume=dict(turn_id=tid,tool_calls=c.turns[tid].tool_calls,reasoning_tokens=c.turns[tid].reasoning))
     assert b.ready['new_session'] is False
     async with asyncio.timeout(160):
         while True:
@@ -168,7 +172,7 @@ async def test_disconnect_does_not_cancel_active_turn(client):
             await b.changed.wait()
     # Finished work replays silently; still-running work resumes under its turn ID.
     if reply[-1].get('replay'):
-        assert reply[-1]['text']
+        assert reply[-1]['text'] and reply[-1]['turn_id']==tid
     else:
         assert reply[-1]['turn_id']==tid
         await b.wait('turn_done',turn_id=tid,timeout=160)
@@ -188,3 +192,27 @@ async def test_countdown_extension_preserves_id(client):
         for e in c.events:
             if e['type']=='countdown' and not c.closed:
                 await c.send(type='countdown',countdown_id=e['countdown_id'],ended=True)
+
+
+async def test_cancel_capture_before_submission_has_no_transcript(client):
+    from arya_test.audio import speech
+    c=await client(transcripts=True)
+    await c.send(type='endpointing',on=False)
+    await c.pcm(await speech('Arya, remember this request should be discarded.'))
+    await c.send(type='cancel')
+    await c.quiet_for(1,{'thinking','transcript','interrupted','turn_done'})
+    await c.send(type='endpointing',on=True)
+    await c.send(commit=True)
+    await c.quiet_for(.5,{'thinking','transcript','interrupted','turn_done'})
+
+
+@pytest.mark.parametrize('value', [1,'true'])
+async def test_commit_requires_exact_true(client,value):
+    from arya_test.audio import speech
+    c=await client(transcripts=True)
+    await c.send(type='endpointing',on=False)
+    await c.pcm(await speech('Arya, what is two plus two? No tools, answer briefly.'))
+    await c.send(commit=value)
+    await c.quiet_for(.5,{'thinking','transcript','speaking'})
+    await c.send(type='endpointing',on=True,commit=True)
+    await c.finish(user=True)

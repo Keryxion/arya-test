@@ -4,11 +4,16 @@ import contextlib
 import json
 import time
 import uuid
+import unicodedata
 from dataclasses import dataclass, field
 
 import aiohttp
 
 from .audio import Opus, speech
+
+
+class AudioUnavailable(Exception):
+    """The server explicitly declined optional audio with the documented 4503."""
 
 
 @dataclass
@@ -17,6 +22,10 @@ class Turn:
     speaking: bool = False
     done: dict | None = None
     interrupted: bool = False
+    failed: bool = False
+    resumed: bool = False
+    saw_thinking: bool = False
+    resume_state: bool = False
     tool_calls: int = 0
     reasoning: int | None = None
     first_audio: float | None = None
@@ -26,12 +35,18 @@ class Turn:
 
 
 class Client:
-    def __init__(self, url, key, device=None, **start):
+    def __init__(self, url, key, device=None, resume=None, **start):
         self.url, self.key = url, key
         self.start = dict(type='start', assistant_name='Arya', device_name=device or f'arya-test-{uuid.uuid4().hex}',
                           input_rate=16000, output_rate=24000)
         self.start.update(start)
         self.events, self.turns = [], {}
+        self.pending_interruption = None
+        self.resume = resume
+        self.snapshot_turn = None
+        self.activation = False
+        self.muted = False
+        self.transient_turns = set()
         self.active_audio = None
         self.changed = asyncio.Event()
         self.failure = None
@@ -67,11 +82,16 @@ class Client:
         for k in ['session_id', 'recipient_id']:
             assert isinstance(r.get(k), str) and r[k], f'ready.{k} missing'
         for k in ['assistant_name', 'device_name']:
-            assert r.get(k) == self.start[k], f'ready.{k} mismatch'
+            expected = unicodedata.normalize('NFC', ' '.join(self.start[k].split()))
+            assert r.get(k) == expected, f'ready.{k} mismatch'
         assert r.get('transcripts') is (self.start.get('transcripts') is True)
         fmt = self.start.get('audio_format', 'pcm16')
         for direction, requested in [('input', 'input_rate'), ('output', 'output_rate')]:
-            assert r[direction]['sample_rate'] == self.start[requested]
+            rate = self.start[requested]
+            if fmt == 'pcm16':
+                rate = max(8000, min(48000, rate)) if type(rate) is int else (16000 if direction == 'input' else 24000)
+            assert r[direction]['sample_rate'] == rate, f'{direction} rate mismatch'
+            self.start[requested] = rate
             assert r[direction]['format'] == fmt
         assert r['input']['block_ms'] == (20 if fmt == 'opus' else 30)
         if fmt == 'opus':
@@ -80,7 +100,7 @@ class Client:
         assert 0 < r['server_recv_unix_ms'] <= r['server_send_unix_ms']
         if self.start.get('models') is not True:
             assert 'model_catalog' not in r, 'unsolicited model inventory'
-        if 'after' in self.start:
+        if isinstance(self.start.get('after'), str):
             assert type(r.get('new_session')) is bool
 
     async def select_free(self):
@@ -90,23 +110,17 @@ class Client:
         assert e['model'] == 'free' and e['uses_default'] is False and e['applies_to'] == 'next_turn'
 
     async def send(self, data=None, **kwargs):
-        await self.ws.send_json(data if data is not None else kwargs)
+        frame = data if data is not None else kwargs
+        if frame.get('type') == 'say' and isinstance(frame.get('text'), str) and frame['text'].strip():
+            self.transient_turns.add(None)  # bind to the next thinking frame
+        await self.ws.send_json(frame)
 
     async def _read(self):
         try:
             async for msg in self.ws:
                 now = time.monotonic()
                 if msg.type == aiohttp.WSMsgType.BINARY:
-                    assert self.active_audio is not None, 'binary before speaking or after completion'
-                    t = self.turns[self.active_audio]
-                    pcm = t.decoder.decode(msg.data) if t.decoder else msg.data
-                    assert pcm and len(pcm) % 2 == 0, 'invalid PCM16 reply'
-                    t.pcm.extend(pcm)
-                    t.first_audio = t.first_audio or now
-                    rate = self.start['output_rate']
-                    # 1.5s allowed lead plus 0.75s scheduling/transit tolerance.
-                    assert len(t.pcm)/(rate*2) <= now-t.first_audio+2.25, 'server audio exceeds playback lead'
-                    t.speaker_until = max(now, t.speaker_until) + len(pcm)/(rate*2)
+                    self._audio(msg.data, now)
                 elif msg.type == aiohttp.WSMsgType.TEXT:
                     assert self.key not in msg.data, 'server echoed API credential'
                     e = json.loads(msg.data)
@@ -117,6 +131,9 @@ class Client:
                     self.events.append(e)
                     if e['type'] == 'speaking':
                         await self.send(type='state', turn_id=e['turn_id'], state='speaking')
+                    if e['type'] == 'turn_done' and e.get('next_action') == 'mute':
+                        self.muted, self.activation = True, False
+                        await self.stop_ambient()
                     if e['type'] == 'turn_done':
                         self.tasks.append(asyncio.create_task(self._drain(e['turn_id'])))
                 elif msg.type == aiohttp.WSMsgType.ERROR:
@@ -128,29 +145,75 @@ class Client:
             self.closed = True
             self.changed.set()
 
+    def _audio(self, packet, now):
+        assert self.pending_interruption is None, 'audio between interruption and completion'
+        assert self.active_audio is not None, 'binary before speaking or after completion'
+        t = self.turns[self.active_audio]
+        if self.start.get('transcripts') is True and self.active_audio not in self.transient_turns:
+            events = [e for e in self.events if e.get('turn_id') == self.active_audio]
+            approval_question = any(e['type']=='approval_request' for e in events)
+            assert approval_question or any(e['type']=='transcript' and e.get('role')=='assistant' and e.get('text') and not e.get('replay') for e in events), 'reply audio before live transcript text'
+        pcm = t.decoder.decode(packet) if t.decoder else packet
+        assert pcm and len(pcm) % 2 == 0, 'invalid PCM16 reply'
+        t.pcm.extend(pcm)
+        t.first_audio = t.first_audio or now
+        rate = self.start['output_rate']
+        # 1.5s allowed lead plus 0.75s scheduling/transit tolerance.
+        assert len(t.pcm)/(rate*2) <= now-t.first_audio+2.25, 'server audio exceeds playback lead'
+        t.speaker_until = max(now, t.speaker_until) + len(pcm)/(rate*2)
+
     def _validate(self, e, now):
         kind = e['type']
+        tid = e.get('turn_id')
+        if self.pending_interruption is not None and tid is not None:
+            assert tid == self.pending_interruption and kind == 'turn_done', 'new/old turn frame before interrupted turn completes'
+        if tid in self.turns and self.turns[tid].interrupted:
+            assert kind == 'turn_done', 'frame after interruption'
         if kind == 'transcript':
             assert self.start.get('transcripts') is True, 'unsolicited transcript'
             assert e.get('role') in ('user', 'assistant') and isinstance(e.get('text'), str)
             assert isinstance(e.get('turn_id'), str) and e['turn_id']
             if e.get('replay'):
-                assert e.get('message_id'), 'replay missing cursor'
+                assert not any(x['type'] in ('thinking', 'speaking', 'state') for x in self.events), 'replay after live output'
+                if not e.get('message_id'):
+                    assert e['role'] == 'assistant', 'user replay missing cursor'
+                    assert self.snapshot_turn is None, 'multiple running-text snapshots'
+                    assert not any(x['type'] in ('thinking', 'speaking', 'state') for x in self.events), 'snapshot after live output'
+                    self.snapshot_turn = tid
+                    self.turns.setdefault(tid, Turn()).resumed = True
+                else:
+                    assert self.snapshot_turn is None, 'history after running-text snapshot'
                 return
         if kind in {'thinking', 'speaking', 'state', 'transcript', 'interrupted', 'turn_done'} or (kind == 'error' and 'turn_id' in e):
             tid = e.get('turn_id')
             assert isinstance(tid, str) and tid, f'{kind} missing turn_id'
             t = self.turns.setdefault(tid, Turn())
+            if self.resume and tid == self.resume['turn_id']:
+                t.resumed = True
+            if t.resumed and not t.saw_thinking and kind not in ('state', 'thinking'):
+                raise AssertionError('resumed live frame before state and thinking')
             if kind == 'thinking':
+                if None in self.transient_turns:
+                    self.transient_turns.remove(None)
+                    self.transient_turns.add(tid)
                 assert not t.done and not t.interrupted, 'liveness after terminal frame'
                 count, reason = e.get('tool_calls'), e.get('reasoning_tokens')
                 assert type(count) is int and count >= t.tool_calls
                 assert reason is None or (type(reason) is int and reason >= (t.reasoning or 0))
-                if not any(x.get('turn_id') == tid and x['type'] == 'thinking' for x in self.events):
-                    assert count == 0 and reason is None, 'initial counters not reset'
+                if not t.saw_thinking:
+                    if t.resumed:
+                        assert t.resume_state, 'resumed thinking before state'
+                        baseline = self.resume if self.resume and tid == self.resume['turn_id'] else {}
+                        assert count >= baseline.get('tool_calls', 0), 'resumed tool counter reset'
+                        previous = baseline.get('reasoning_tokens')
+                        assert previous is None or (reason is not None and reason >= previous), 'resumed reasoning counter reset'
+                    else:
+                        assert count == 0 and reason is None, 'initial counters not reset'
+                t.saw_thinking = True
                 assert not {'tools', 'arguments', 'results', 'reasoning'} & e.keys()
                 t.tool_calls, t.reasoning = count, reason
             elif kind == 'state':
+                t.resume_state = True
                 assert e.get('state') in ('thinking', 'speaking', 'listening')
             elif kind == 'speaking':
                 assert not t.done and not t.interrupted
@@ -160,6 +223,8 @@ class Client:
                 t.speaking = True
                 self.active_audio = tid
             elif kind == 'transcript':
+                assert tid not in self.transient_turns, 'say emitted transcript'
+                assert not t.failed and not t.done, 'transcript after terminal frame'
                 if e['role'] == 'user':
                     assert e.get('message_id'), 'user transcript missing message_id'
                     assert any(x['type'] == 'thinking' and x.get('turn_id') == tid for x in self.events), 'user transcript before thinking'
@@ -169,16 +234,22 @@ class Client:
                     assert e['text'], 'empty transcript without cursor'
             elif kind == 'interrupted':
                 t.interrupted, t.speaker_until = True, now
+                self.pending_interruption = tid
                 if self.active_audio == tid:
                     self.active_audio = None
+            elif kind == 'error':
+                t.failed = True
             elif kind == 'turn_done':
-                assert e.get('next_action') in ('listen', 'standby')
-                if t.interrupted:
-                    assert e['next_action'] == 'listen'
+                if 'next_action' in e:
+                    assert e['next_action'] in ('listen', 'standby', 'mute'), 'invalid next_action'
+                if t.interrupted or t.failed:
+                    assert 'next_action' not in e, 'terminal failure/interruption carries action'
+                if self.pending_interruption == tid:
+                    self.pending_interruption = None
                 turn_events = [x for x in self.events if x.get('turn_id') == tid]
                 pieces = [x for x in turn_events if x['type'] == 'transcript' and x.get('role') == 'assistant' and not x.get('replay')]
-                if pieces and not t.interrupted and not any(x['type']=='error' for x in turn_events):
-                    assert pieces[-1].get('message_id') and pieces[-1]['text']=='', 'assistant reply missing closing transcript cursor'
+                if (pieces or self.snapshot_turn == tid) and not t.interrupted and not any(x['type']=='error' for x in turn_events):
+                    assert pieces and pieces[-1].get('message_id') and pieces[-1]['text']=='', 'assistant reply missing closing transcript cursor'
                     assert sum(bool(x.get('message_id')) for x in pieces)==1, 'duplicate assistant closing cursor'
                 t.done = e
                 if self.active_audio == tid:
@@ -209,7 +280,13 @@ class Client:
                 for e in self.events[after:]:
                     if e['type'] == kind and all(e.get(k) == v for k, v in fields.items()):
                         return e
-                assert not self.closed, f'socket closed ({self.ws.close_code}) waiting for {kind}'
+                if self.closed and kind == 'ready':
+                    errors = [e for e in self.events if e['type'] == 'error']
+                    if errors and errors[-1].get('error') == 'audio_unavailable':
+                        assert self.start.get('audio_format') == 'opus', 'mandatory PCM16 unavailable'
+                        assert self.ws.close_code == 4503, 'audio_unavailable must close 4503'
+                        raise AudioUnavailable('4503 audio_unavailable: optional codec unavailable')
+                assert not self.closed, f'socket closed ({self.ws.close_code}) waiting for {kind}; errors: {[e.get("error") for e in self.events if e["type"] == "error"]}'
                 await self.changed.wait()
 
     async def quiet_for(self, seconds, forbidden):
@@ -232,6 +309,8 @@ class Client:
             await asyncio.sleep(max(0, clock-asyncio.get_running_loop().time()))
 
     async def utterance(self, text, commit=True):
+        assert not self.muted, 'cannot stream microphone while muted'
+        self.activation = True
         pcm = await speech(text, self.start['input_rate'])
         await self.stop_ambient()
         offset = len(self.events)
@@ -262,8 +341,14 @@ class Client:
         try:
             await asyncio.sleep(max(0, t.speaker_until-time.monotonic()))
             if not self.closed:
+                action = t.done.get('next_action')
+                if action in ('standby', 'mute'):
+                    self.activation = False
+                    await self.stop_ambient()
+                elif action == 'listen' and not self.muted:
+                    self.activation = True
                 await self.send(type='state', turn_id=tid,
-                                state='listening' if t.done['next_action']=='listen' else 'standby')
+                                state='listening' if self.activation and not self.muted else 'standby')
         finally:
             t.drained.set()
 
@@ -280,7 +365,7 @@ class Client:
         if audio:
             assert len(t.pcm) > 0 and any(t.pcm), 'no audible reply PCM'
         await asyncio.wait_for(t.drained.wait(), 160)
-        if done['next_action'] == 'standby':
+        if done.get('next_action') in ('standby', 'mute'):
             await self.stop_ambient()
         return done
 

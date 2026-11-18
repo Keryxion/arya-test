@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 import pytest
 import pytest_asyncio
-from arya_test.client import Client
+from arya_test.client import Client, AudioUnavailable
 
 
 @pytest.fixture
@@ -21,7 +21,10 @@ async def client(live_config, request):
     async def create(browser=False, select=True, **start):
         c = Client(*live_config, **start)
         clients.append(c)
-        return await c.connect(browser=browser, select=select)
+        try:
+            return await c.connect(browser=browser, select=select)
+        except AudioUnavailable as exc:
+            pytest.skip(str(exc))
     yield create
     failures = []
     for c in clients:

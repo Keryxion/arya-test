@@ -309,3 +309,86 @@ async def test_reset_command_alias(client):
     assert isinstance(e.get('reply'),str)
     await asyncio.wait_for(c.reader,10)
     assert c.ws.close_code==4410
+
+
+async def test_opus_setup_or_explicit_unavailability(live_config):
+    url,key=live_config
+    async with aiohttp.ClientSession() as http:
+        async with http.ws_connect(url) as ws:
+            await ws.send_json({**start(key),'audio_format':'opus'})
+            async with asyncio.timeout(25):
+                frame=await ws.receive_json()
+                if frame['type']=='ready':
+                    assert frame['input']['format']==frame['output']['format']=='opus'
+                    await ws.send_json({'stop':True})
+                else:
+                    assert frame=={'type':'error','error':'audio_unavailable'}
+                    await ws.receive()
+                    assert ws.close_code==4503
+    # Both negotiated Opus and a documented refusal must leave PCM available.
+    from arya_test.client import Client
+    c=Client(url,key)
+    try:
+        await c.connect()
+    finally:
+        await c.close()
+
+
+@pytest.mark.parametrize('value', ['', '   ', 7, None, 'x'*99, 'bad\nname'])
+async def test_invalid_name_values(live_config,value):
+    await rejected(live_config,lambda key:{**start(key),'device_name':value},4400,'bad_start')
+
+
+async def test_names_normalized(client):
+    c=await client(device='  arya-test   e\u0301  ' + uuid.uuid4().hex)
+    assert '  ' not in c.ready['device_name']
+    assert 'é' in c.ready['device_name']
+
+
+@pytest.mark.parametrize('field', ['input_rate','output_rate'])
+@pytest.mark.parametrize('value', ['24000',16000.5,True,None,7999,96000])
+async def test_pcm_rate_validation(client,field,value):
+    c=await client(**{field:value})
+    expected=max(8000,min(48000,value)) if type(value) is int else (16000 if field=='input_rate' else 24000)
+    assert c.ready['input' if field=='input_rate' else 'output']['sample_rate']==expected
+
+
+@pytest.mark.parametrize('value', ['1',True,None,-1,0])
+async def test_invalid_quiet_interval_disabled(client,value):
+    c=await client(quiet_interval=value)
+    await c.pcm(bytes(16000*2*2))
+    await c.quiet_for(.1,{'quiet'})
+    assert not any(e['type']=='quiet' for e in c.events)
+
+
+@pytest.mark.parametrize('value', [7,None,False])
+async def test_nonstring_after_is_absent(client,value):
+    c=await client(transcripts=True,after=value)
+    assert 'new_session' not in c.ready
+
+
+@pytest.mark.parametrize('value', [1,'true','false',[],{}])
+async def test_truthy_stop_is_not_true(client,value):
+    c=await client()
+    await c.send(stop=value)
+    await c.quiet_for(.2,{'turn_done','interrupted'})
+    await c.select_free()
+
+
+async def test_malformed_and_unknown_controls_ignored(client):
+    c=await client()
+    for raw in ['not-json','[]','null','"text"']:
+        await c.ws.send_str(raw)
+    for frame in [dict(type='unknown'),dict(type='endpointing',on='false'),
+                  dict(type='countdown',countdown_id='unknown',ended=True),
+                  dict(type='approval_response',approval_id='unknown',choice='once'),
+                  dict(type='client_diagnostics',request_id='unrequested')]:
+        await c.send(frame)
+    await c.quiet_for(.2,{'error','thinking','turn_done'})
+    await c.select_free()
+
+
+async def test_cancel_without_turn_sends_no_terminal_frames(client):
+    c=await client(transcripts=True)
+    await c.send(type='cancel')
+    await c.quiet_for(.3,{'interrupted','turn_done','transcript'})
