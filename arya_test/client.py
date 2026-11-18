@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import aiohttp
 
 from .audio import Opus, speech
+from .wake import validate_wake_word
 
 
 class AudioUnavailable(Exception):
@@ -85,6 +86,8 @@ class Client:
             expected = unicodedata.normalize('NFC', ' '.join(self.start[k].split()))
             assert r.get(k) == expected, f'ready.{k} mismatch'
         assert r.get('transcripts') is (self.start.get('transcripts') is True)
+        if 'wake_word' in r:
+            validate_wake_word(r['wake_word'])
         fmt = self.start.get('audio_format', 'pcm16')
         for direction, requested in [('input', 'input_rate'), ('output', 'output_rate')]:
             rate = self.start[requested]
@@ -164,6 +167,8 @@ class Client:
 
     def _validate(self, e, now):
         kind = e['type']
+        if kind == 'set_wake_word':
+            validate_wake_word(e)
         tid = e.get('turn_id')
         if self.pending_interruption is not None and tid is not None:
             assert tid == self.pending_interruption and kind == 'turn_done', 'new/old turn frame before interrupted turn completes'
