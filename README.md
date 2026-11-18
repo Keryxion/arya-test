@@ -113,3 +113,30 @@ and counters carry over. Text must precede reply audio when transcripts are on.
 Penny's revision is recorded with live results. A server that has not deployed
 this contract is still checked against it, with deployment lag stated separately
 from harness failures. See `docs/contract-173-validation.md` for measured results.
+
+## Wake-word contract update #132
+
+The snapshot targets hermes-converse
+`c28f7997bbce51d149bdf62e4c0624a3f80ad1f8` ([server PR #132](https://github.com/Keryxion/hermes-converse/pull/132)).
+The harness validates `ready.wake_word` when present and every `set_wake_word`
+frame, including phrase, engine names, model URLs and full SHA256 descriptors.
+The configured live target must advertise downloadable models. The suite rejects
+missing/incorrect HTTP credentials, verifies the advertised manifest/ONNX bytes,
+and fetches the manifest-relative TFLite file with the same key. The contract
+hash covers the manifest; it does not advertise a separate TFLite hash.
+
+Live result checks send all four documented error values and confirm the socket
+remains usable. A speech test asks the real `free` model to change the test-owned
+device's phrase to a different one, validates the resulting `set_wake_word`, and reports `load_failed`
+on that socket. It fails if the model does not invoke the tool. There is no
+undocumented tool-invocation or configuration endpoint in this harness.
+
+These checks verify server wire behavior and downloads. The headless harness has
+no wake detector and never reports successful model loading. Physical clients
+must separately verify continued detection during downloads, atomic model/phrase
+switches, rollback, the 30-second response deadline, cache reuse, and persistence
+across restart. Local HTTP corruption/authentication tests are negative controls
+for the harness, not evidence for physical client behavior. The exact spec
+snapshot comparison and all earlier contract tests remain in place.
+
+Measured results and remaining failures: [wake-word validation](docs/wake-word-132-validation.md).
