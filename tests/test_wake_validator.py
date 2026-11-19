@@ -23,8 +23,19 @@ def test_reject_bad_download_descriptor(field, value):
         validate_wake_word(word)
 
 
+def test_reject_a_model_in_another_format():
+    validate_wake_word(WORD, 'open_wake_word')
+    with pytest.raises(AssertionError):
+        validate_wake_word(WORD, 'micro_wake_word')
+
+
+def test_reject_set_wake_word_without_a_format():
+    with pytest.raises(AssertionError):
+        Client('ws://invalid', 'unused')._validate(dict(type='set_wake_word', **WORD), 0)
+
+
 def test_live_frame_uses_same_validation_as_ready():
-    c = Client('ws://invalid', 'unused')
+    c = Client('ws://invalid', 'unused', wake_word_format='open_wake_word')
     c._validate(dict(type='set_wake_word', **WORD), 0)
     with pytest.raises(AssertionError):
         c._validate(dict(type='set_wake_word', phrase='Hey Sakura'), 0)

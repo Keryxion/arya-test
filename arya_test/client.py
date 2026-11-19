@@ -86,8 +86,11 @@ class Client:
             expected = unicodedata.normalize('NFC', ' '.join(self.start[k].split()))
             assert r.get(k) == expected, f'ready.{k} mismatch'
         assert r.get('transcripts') is (self.start.get('transcripts') is True)
-        if 'wake_word' in r:
-            validate_wake_word(r['wake_word'])
+        if 'wake_word_format' in self.start:
+            assert 'wake_word' in r, 'ready.wake_word missing for a wake-word device'
+            validate_wake_word(r['wake_word'], self.start['wake_word_format'])
+        else:
+            assert 'wake_word' not in r, 'ready.wake_word sent to a device without wake_word_format'
         fmt = self.start.get('audio_format', 'pcm16')
         for direction, requested in [('input', 'input_rate'), ('output', 'output_rate')]:
             rate = self.start[requested]
@@ -168,7 +171,8 @@ class Client:
     def _validate(self, e, now):
         kind = e['type']
         if kind == 'set_wake_word':
-            validate_wake_word(e)
+            assert 'wake_word_format' in self.start, 'set_wake_word sent to a device without wake_word_format'
+            validate_wake_word(e, self.start['wake_word_format'])
         tid = e.get('turn_id')
         if self.pending_interruption is not None and tid is not None:
             assert tid == self.pending_interruption and kind == 'turn_done', 'new/old turn frame before interrupted turn completes'
