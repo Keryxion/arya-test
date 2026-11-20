@@ -4,12 +4,14 @@ import re
 from urllib.parse import urljoin, urlsplit
 
 
-def validate_wake_word(word):
+def validate_wake_word(word, wake_word_format=None):
     assert isinstance(word, dict), 'wake_word must be an object'
     assert isinstance(word.get('phrase'), str) and word['phrase'].strip(), 'missing wake phrase'
     models = word.get('models')
     assert isinstance(models, dict), 'wake models must be an object'
     assert set(models) <= {'micro_wake_word', 'open_wake_word'}, 'unknown wake engine'
+    if wake_word_format is not None:
+        assert set(models) <= {wake_word_format}, 'wake model offered in a format the device does not run'
     for model in models.values():
         assert isinstance(model, dict), 'wake model must be an object'
         assert isinstance(model.get('url'), str) and model['url'], 'missing model URL'
