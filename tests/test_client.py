@@ -214,3 +214,29 @@ def test_replay_comparison_excludes_unrelated_outbound_turns():
     c.events=[dict(type='transcript',role='assistant',turn_id='answer',text='Four.'),
               dict(type='transcript',role='assistant',turn_id='notice',text='Unrelated notice.')]
     assert assistant_text(c,turn_id='answer')=='Four.'
+
+
+class RecordingSocket:
+    closed=False
+    def __init__(self): self.frames=[]
+    async def send_json(self, frame): self.frames.append(frame)
+    async def send_bytes(self, data): pass
+    async def close(self): self.closed=True
+
+
+async def test_commit_is_a_typed_endpointing_frame(monkeypatch):
+    async def silence(text, rate): return bytes(rate//50*2)
+    monkeypatch.setattr('arya_test.client.speech', silence)
+    c=Client('ws://invalid','unused')
+    c.ws=RecordingSocket()
+    await c.utterance('hello')
+    c.closed=True
+    await c.stop_ambient()
+    assert c.ws.frames==[{'type':'endpointing','commit':True}]
+
+
+async def test_close_sends_no_frame():
+    c=Client('ws://invalid','unused')
+    c.ws=RecordingSocket()
+    await c.close()
+    assert c.ws.closed and c.ws.frames==[]

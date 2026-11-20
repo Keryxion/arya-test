@@ -62,9 +62,9 @@ Standalone manual runs test whatever revision Penny is serving.
 | --- | --- |
 | §1 authentication | Both auth paths, secret subprotocol not echoed, missing/bad keys, invalid first JSON/binary frames |
 | §2 start and reconnect | Required/forbidden names, PCM and Opus rate matrix, invalid codec/rates, ready identities/timestamps, malformed Opus, 4503 refusal/PCM fallback, name/rate validation, attachment replacement, reconnect identity |
-| §3 controls/commands | Exact-true stop/commit, empty commit, cancellation during capture and current/stale cancellation, command catalog, invalid/unknown commands, title/new, say/empty say |
+| §3 controls/commands | Typed `endpointing` commit ends an utterance, exact-true commit, `on` applied beside a non-true commit, empty commit, closing the socket keeps the conversation, cancellation during capture and current/stale cancellation, command catalog, invalid/unknown commands, title/new, say/empty say |
 | §4 lifecycle/transcripts | Real speech and synthetic outbound speech, turn IDs, optional listen/standby/mute actions, ordered interruption/audio, text before audio, pacing, carried reconnect counters/text snapshot, opt-in transcripts, closing cursor, history/replay identity, barge-in |
-| §5 silence | No wall-clock quiet, quiet from received samples |
+| §5 silence | No wall-clock quiet, quiet from received samples. The quiet threshold and the longer wait after Talk are device behaviour and are not checked |
 | §6–7 flow and IDs | Real automatic endpointing and forced endpointing, repeated turns, turn correlation |
 | §8 wake | Correlated one-second decisions, exact phrase separation, invalid requests/signals; streaming without a wake claim |
 | §9 outbound audio | Idle `say`, no synthetic user/wake event, standby, subsequent output after drain |
@@ -140,3 +140,28 @@ for the harness, not evidence for physical client behavior. The exact spec
 snapshot comparison and all earlier contract tests remain in place.
 
 Measured results and remaining failures: [wake-word validation](docs/wake-word-132-validation.md).
+
+## Contract update #199
+
+The snapshot targets hermes-converse
+`33a2e8258391c51b7aa04528b42736d9f6b327bc` ([server PR #199](https://github.com/Keryxion/hermes-converse/pull/199)).
+Every control frame the harness sends has a `type`. It commits with
+`{"type":"endpointing","commit":true}` and ends a session by closing the socket,
+without `cancel`, so a turn still running is left to finish.
+
+Live checks: with endpointing off, two seconds of silence do not end an
+utterance and the typed commit alone does; a commit that is not `true` does not
+commit, and a boolean `on` beside it still applies; a typed commit with nothing
+said is ignored; after the socket closes, the device's conversation, history and
+replay cursor remain; a turn running when the socket closes finishes with nothing
+connected and is replayed whole, with its cursor and without being spoken, on a
+reconnect 30 seconds later; a reconnect while the turn is still running resumes
+it under its turn ID.
+
+Not checked: the bare `{"commit": true}` and `{"stop": true}` frames. The server
+accepts them until 2026-12-20, so the suite neither sends them nor asserts that
+they are refused. The 5-second default quiet threshold, the four-times wait after
+manual Talk, and the labelling and behaviour of a stop-listening control belong
+to a device; the server enforces none of them, and this headless harness has no
+Talk control. Physical clients must verify them separately. No check sends
+`cancel` and then closes the socket to confirm the turn is stopped.

@@ -80,13 +80,14 @@ async def test_model_change_during_turn_keeps_audio(client):
     assert not any(e['type']=='interrupted' for e in c.events)
 
 
-async def test_history_reconnect_cursor_and_stop(client):
+async def test_history_reconnect_cursor_after_close(client):
     c=await client(transcripts=True)
     offset=await c.utterance('Arya, remember the secret word is pineapple. Repeat the word briefly without tools.')
     await c.finish(offset,user=c.start.get("transcripts") is True)
     user=next(e for e in c.events if e['type']=='transcript' and e.get('role')=='user')
     closing=next(e for e in reversed(c.events) if e['type']=='transcript' and e.get('role')=='assistant' and e.get('message_id'))
-    await c.send(stop=True)
+    await c.stop_ambient()
+    await c.ws.close()
     await asyncio.wait_for(c.reader,10)
     b=await client(device=c.start['device_name'],transcripts=True,after=user['message_id'])
     assert b.ready['new_session'] is False
@@ -98,7 +99,7 @@ async def test_history_reconnect_cursor_and_stop(client):
     assert not any(e['type']=='speaking' for e in b.events), 'history replay was spoken'
     offset=await b.utterance('What secret word did I ask you to remember? No tools, answer briefly.')
     await b.finish(offset,user=True)
-    assert 'pineapple' in assistant_text(b,offset).lower(), 'history lost on stop/reconnect'
+    assert 'pineapple' in assistant_text(b,offset).lower(), 'history lost on close/reconnect'
 
 
 async def test_unknown_cursor_starts_fresh_view(client):
@@ -158,7 +159,7 @@ async def test_disconnect_does_not_cancel_active_turn(client):
     tid=user['turn_id']
     await c.wait('transcript',after=offset,role='assistant',turn_id=tid,timeout=120)
     await c.stop_ambient()
-    await c.ws.close()  # An actual drop, not the stop control.
+    await c.ws.close()  # No cancel first: the running turn must finish on the server.
     await c.reader
     b=await client(device=c.start['device_name'],transcripts=True,after=user['message_id'],
                    resume=dict(turn_id=tid,tool_calls=c.turns[tid].tool_calls,reasoning_tokens=c.turns[tid].reasoning))
@@ -176,6 +177,24 @@ async def test_disconnect_does_not_cancel_active_turn(client):
     else:
         assert reply[-1]['turn_id']==tid
         await b.wait('turn_done',turn_id=tid,timeout=160)
+
+
+async def test_turn_finishes_after_close_and_is_replayed_unspoken(client):
+    c=await client(transcripts=True)
+    offset=await c.utterance('Arya, explain why the sky is blue in two sentences. Do not use tools.')
+    user=await c.wait('transcript',after=offset,role='user')
+    tid=user['turn_id']
+    assert not c.turns[tid].done, 'turn finished before the socket closed'
+    await c.stop_ambient()
+    await c.ws.close()  # No cancel and no stop frame.
+    await c.reader
+    await asyncio.sleep(30)  # Nothing is connected while the reply finishes.
+    b=await client(device=c.start['device_name'],transcripts=True,after=user['message_id'])
+    assert b.ready['new_session'] is False
+    replay=await b.wait('transcript',replay=True,role='assistant',turn_id=tid,timeout=10)
+    assert replay.get('message_id') and replay['text'], 'turn was still running 30 seconds after the socket closed, or its reply was lost'
+    await b.quiet_for(2,{'speaking','thinking'})
+    assert not b.turns.get(tid) or not b.turns[tid].pcm, 'reply finished while disconnected was spoken later'
 
 
 async def test_countdown_extension_preserves_id(client):
@@ -202,7 +221,7 @@ async def test_cancel_capture_before_submission_has_no_transcript(client):
     await c.send(type='cancel')
     await c.quiet_for(1,{'thinking','transcript','interrupted','turn_done'})
     await c.send(type='endpointing',on=True)
-    await c.send(commit=True)
+    await c.send(type='endpointing',commit=True)
     await c.quiet_for(.5,{'thinking','transcript','interrupted','turn_done'})
 
 
@@ -212,7 +231,33 @@ async def test_commit_requires_exact_true(client,value):
     c=await client(transcripts=True)
     await c.send(type='endpointing',on=False)
     await c.pcm(await speech('Arya, what is two plus two? No tools, answer briefly.'))
-    await c.send(commit=value)
+    await c.send(type='endpointing',commit=value)
     await c.quiet_for(.5,{'thinking','transcript','speaking'})
+    await c.send(type='endpointing',on=True,commit=True)
+    await c.finish(user=True)
+
+
+async def test_typed_commit_alone_ends_the_utterance(client):
+    from arya_test.audio import speech
+    c=await client(transcripts=True)
+    await c.send(type='endpointing',on=False)
+    await c.pcm(await speech('Arya, what is two plus two? No tools, answer briefly.'))
+    # Endpointing is off, so two seconds of silence must not end the utterance.
+    await c.pcm(bytes(c.start['input_rate']*2*2))
+    assert not any(e['type'] in ('thinking','transcript','speaking') for e in c.events)
+    offset=len(c.events)
+    await c.send(type='endpointing',commit=True)
+    done=await c.finish(offset,user=True)
+    user=next(e for e in c.events[offset:] if e['type']=='transcript' and e['role']=='user')
+    assert user['text'] and user['turn_id']==done['turn_id']
+
+
+async def test_endpointing_on_applies_when_commit_is_not_true(client):
+    from arya_test.audio import speech
+    c=await client(transcripts=True)
+    await c.send(type='endpointing',on=False,commit='true')
+    await c.pcm(await speech('Arya, what is two plus two? No tools, answer briefly.'))
+    await c.pcm(bytes(c.start['input_rate']*2*2))
+    assert not any(e['type'] in ('thinking','transcript','speaking') for e in c.events), 'on:false ignored beside a non-true commit'
     await c.send(type='endpointing',on=True,commit=True)
     await c.finish(user=True)
