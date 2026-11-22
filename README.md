@@ -2,7 +2,7 @@
 
 Independent, headless client-contract checks for the **live Penny server**, using
 **model `free`**. This private repository owns the tests; hermes-converse's Crow
-workflow unpacks a pinned source revision and reports the result after each successful Penny deployment.
+workflow unpacks the latest published source and reports the result after each successful Penny deployment.
 
 The client uses only the documented WebSocket protocol. It imports no server
 modules and mocks no server component. It sends synthesized microphone speech
@@ -84,11 +84,10 @@ to a pass.
 ## Crow
 
 `.crow.yaml` allows standalone manual runs of this repository's tests.
-`ci/run.sh` is the check entry point. The hermes-converse workflow unpacks a versioned source archive from a masked
-Crow secret and verifies its SHA256. `scripts/publish-crow-bundle.py` publishes
-that archive from a committed suite revision. This avoids handing a public
-repository a broad GitHub credential for a private checkout. Each version has its
-own secret name so older commits continue to test the revision they pin. The `arya_penny_api_key` secret is needed on each Crow repository,
+`ci/run.sh` is the check entry point. The hermes-converse workflow unpacks a source archive from the masked
+Crow secret `arya_test_source`. `scripts/publish-crow-bundle.py` replaces
+that secret with the checked-out revision; run it after merging a change to the suite.
+This avoids handing a public repository a broad GitHub credential for a private checkout. The `arya_penny_api_key` secret is needed on each Crow repository,
 limited to `deployment` on hermes-converse and `manual` on arya-test.
 Source-bundle secrets on hermes-converse allow only `deployment`.
 
