@@ -140,3 +140,11 @@ for the harness, not evidence for physical client behavior. The exact spec
 snapshot comparison and all earlier contract tests remain in place.
 
 Measured results and remaining failures: [wake-word validation](docs/wake-word-132-validation.md).
+
+## Default wake phrase update #196
+
+The snapshot targets hermes-converse
+`9db7a097e78145cb9421e4f86a4d316578ef145a` ([server PR #196](https://github.com/Keryxion/hermes-converse/pull/196)).
+Devices ship a bundled `Hey Arya` model, which is the phrase before any switch;
+the spec's switching examples use `Hey Sakura`. The live switch test therefore
+asks for `Hey Sakura` unless that is already configured. No wire format changed.
