@@ -56,14 +56,17 @@ def pytest_terminal_summary(terminalreporter):
     reason=lambda r: (getattr(getattr(r.longrepr,'reprcrash',None),'message','') or str(r.longrepr)).strip().splitlines()[0][:200]
     lines=[f"## {'❌' if reports['failed'] else '✅'} Arya live suite: {counts}",'',
         f"Target `{os.environ.get('ARYA_URL','unset')}`, model `free`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`."]
-    root=Path(__file__).parents[1]
-    spec=os.environ.get('ARYA_SPEC_FILE')
-    if spec and Path(spec).read_bytes()!=(root/'specs/client.md').read_bytes():
-        lines+=['',f"⚠️ The deployed `specs/client.md` differs from the suite's snapshot (`{(root/'specs/revision').read_text().strip()[:12]}`): "
-            'failures may be the suite lagging the contract, not the server breaking it.']
-    for title,key in (('Failed','failed'),('Unexpectedly passing (drop the xfail)','xpassed')):
-        if reports[key]:
-            lines+=['',f'### {title}','']+[f'- `{r.nodeid}`: {reason(r)}' if key=='failed' else f'- `{r.nodeid}`' for r in reports[key]]
+    # One line per distinct reason: an unreachable server fails every test the same way.
+    by_reason={}
+    for r in reports['failed']:
+        by_reason.setdefault(reason(r),[]).append(r.nodeid)
+    if by_reason:
+        lines+=['','### Failed','']
+    for why,ids in sorted(by_reason.items(),key=lambda x:-len(x[1])):
+        names=', '.join(f'`{i}`' for i in ids[:3])+(f' and {len(ids)-3} more' if len(ids)>3 else '')
+        lines.append(f'- **{len(ids)}×** {why}: {names}' if len(ids)>1 else f'- {names}: {why}')
+    if reports['xpassed']:
+        lines+=['','### Passing despite an xfail mark (remove the mark)','']+[f'- `{r.nodeid}`' for r in reports['xpassed']]
     if os.environ.get('CI_PIPELINE_URL'):
         lines+=['',f"[Full log]({os.environ['CI_PIPELINE_URL']})"]
     Path('reports').mkdir(exist_ok=True)
