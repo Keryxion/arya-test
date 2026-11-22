@@ -1,4 +1,4 @@
-"""All assertions come from specs/client.md, never server imports/mocks."""
+"""All assertions come from hermes-converse specs/client.md, never server imports/mocks."""
 import asyncio
 import uuid
 import aiohttp
