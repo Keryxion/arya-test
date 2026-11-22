@@ -39,7 +39,7 @@ def test_live_frame_uses_same_validation_as_ready():
     c._validate(dict(type='set_wake_word', **WORD), 0)
     with pytest.raises(AssertionError):
         c._validate(dict(type='set_wake_word', phrase='Hey Sakura'), 0)
-    validate_wake_word({'phrase': 'Hey Sakura', 'models': {}})  # bundled model allowed
+    validate_wake_word({'phrase': 'Hey Arya', 'models': {}})  # bundled default allowed
 
 
 @pytest.mark.parametrize('reference', ['https://other.invalid/model', '//other.invalid/model', 'http://example.invalid/model'])

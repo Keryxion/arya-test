@@ -45,3 +45,29 @@ async def client(live_config, request):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     setattr(item, 'rep_' + call.when, outcome.get_result())
+
+
+def pytest_terminal_summary(terminalreporter):
+    """Write reports/summary.md: the report ci/run.sh prints and posts."""
+    stats=terminalreporter.stats
+    reports={k:[r for r in stats.get(k,[]) if getattr(r,'when','call') in ('call','setup')] for k in ('passed','failed','error','skipped','xfailed','xpassed')}
+    reports['failed']+=reports.pop('error')
+    counts=', '.join(f'{len(v)} {k}' for k,v in reports.items() if v) or 'no tests ran'
+    reason=lambda r: (getattr(getattr(r.longrepr,'reprcrash',None),'message','') or str(r.longrepr)).strip().splitlines()[0][:200]
+    lines=[f"## {'❌' if reports['failed'] else '✅'} Arya live suite: {counts}",'',
+        f"Target `{os.environ.get('ARYA_URL','unset')}`, model `free`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`."]
+    # One line per distinct reason: an unreachable server fails every test the same way.
+    by_reason={}
+    for r in reports['failed']:
+        by_reason.setdefault(reason(r),[]).append(r.nodeid)
+    if by_reason:
+        lines+=['','### Failed','']
+    for why,ids in sorted(by_reason.items(),key=lambda x:-len(x[1])):
+        names=', '.join(f'`{i}`' for i in ids[:3])+(f' and {len(ids)-3} more' if len(ids)>3 else '')
+        lines.append(f'- **{len(ids)}×** {why}: {names}' if len(ids)>1 else f'- {names}: {why}')
+    if reports['xpassed']:
+        lines+=['','### Passing despite an xfail mark (remove the mark)','']+[f'- `{r.nodeid}`' for r in reports['xpassed']]
+    if os.environ.get('CI_PIPELINE_URL'):
+        lines+=['',f"[Full log]({os.environ['CI_PIPELINE_URL']})"]
+    Path('reports').mkdir(exist_ok=True)
+    Path('reports/summary.md').write_text('\n'.join(lines)+'\n')

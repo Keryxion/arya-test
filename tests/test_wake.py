@@ -29,7 +29,7 @@ async def test_a_device_without_a_format_gets_no_wake_word(client):
 @pytest.mark.parametrize('error', ['model_unavailable', 'download_failed', 'hash_mismatch', 'load_failed'])
 async def test_wake_result_frame_keeps_connection_usable(client, error):
     c = await client(wake_word_format='micro_wake_word')
-    phrase = c.ready.get('wake_word', {}).get('phrase', 'Hey Sakura')
+    phrase = c.ready.get('wake_word', {}).get('phrase', 'Hey Arya')
     await c.send(type='wake_word_set', phrase=phrase, status='error', error=error)
     await c.select_free()
 
@@ -38,7 +38,7 @@ async def test_wake_result_frame_keeps_connection_usable(client, error):
 async def test_live_set_wake_word_reports_failure_on_same_socket(client):
     c = await client(transcripts=True, wake_word_format='micro_wake_word')
     previous = c.ready['wake_word']['phrase']
-    target = 'Hey Arya' if previous != 'Hey Arya' else 'Hey Sakura'
+    target = 'Hey Sakura' if previous != 'Hey Sakura' else 'Hey Arya'
     offset = await c.utterance(f'Change my wake word to {target}. Call the set wake word tool to do it. Give a very brief reply after the tool finishes.')
     command = await c.wait('set_wake_word', after=offset, timeout=120)
     assert command['phrase'] == target

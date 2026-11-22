@@ -2,7 +2,7 @@
 
 Independent, headless client-contract checks for the **live Penny server**, using
 **model `free`**. This private repository owns the tests; hermes-converse's Crow
-workflow unpacks a pinned source revision and reports the result after each successful Penny deployment.
+workflow unpacks the latest published source and reports the result after each successful Penny deployment.
 
 The client uses only the documented WebSocket protocol. It imports no server
 modules and mocks no server component. It sends synthesized microphone speech
@@ -41,10 +41,17 @@ negative controls run without credentials: `python -m pytest tests/test_client.p
 
 ## Contract and reports
 
-`specs/client.md` is the contract snapshot; `specs/revision` records its upstream
-commit. Crow sets `ARYA_SPEC_FILE` to the triggering hermes-converse checkout's
-spec. A changed contract fails the check until its assertions and snapshot are
-reviewed together. Assertions follow the specification even when Penny disagrees.
+The contract is hermes-converse `specs/client.md`. This repository keeps no copy
+of it: a test names the section it checks, and a contract change is followed by a
+change to the tests, not to a snapshot. Assertions follow the specification even
+when Penny disagrees.
+
+Each run writes `reports/summary.md`: the counts, every failure with its reason,
+and a link to the log. `ci/run.sh` prints it and `ci/post-report.py` posts it as
+one comment on the deployed hermes-converse pull request, replaced on each run.
+Posting needs `GITHUB_TOKEN` (pull-request write on hermes-converse) from the Crow
+secret `arya_report_github_token`; without a working token the report is only in
+the log, and the result of the check is unchanged.
 
 JUnit is written to `reports/junit.xml`. Sanitized per-test frame traces and audio
 byte counts are written to `reports/traces/`; no API key, start-auth frame, raw
@@ -84,11 +91,10 @@ to a pass.
 ## Crow
 
 `.crow.yaml` allows standalone manual runs of this repository's tests.
-`ci/run.sh` is the check entry point. The hermes-converse workflow unpacks a versioned source archive from a masked
-Crow secret and verifies its SHA256. `scripts/publish-crow-bundle.py` publishes
-that archive from a committed suite revision. This avoids handing a public
-repository a broad GitHub credential for a private checkout. Each version has its
-own secret name so older commits continue to test the revision they pin. The `arya_penny_api_key` secret is needed on each Crow repository,
+`ci/run.sh` is the check entry point. The hermes-converse workflow unpacks a source archive from the masked
+Crow secret `arya_test_source`. `scripts/publish-crow-bundle.py` replaces
+that secret with the checked-out revision; run it after merging a change to the suite.
+This avoids handing a public repository a broad GitHub credential for a private checkout. The `arya_penny_api_key` secret is needed on each Crow repository,
 limited to `deployment` on hermes-converse and `manual` on arya-test.
 Source-bundle secrets on hermes-converse allow only `deployment`.
 
@@ -101,7 +107,7 @@ crow --disable-update-check pipeline create Keryxion/arya-test --branch main
 
 ## Contract update #173
 
-The snapshot and assertions target hermes-converse `76e1f3c` (merged #173).
+The assertions target hermes-converse `76e1f3c` (merged #173).
 Normal completions may omit `next_action`; errors/interruption must omit it.
 The headless client preserves its activation across absent actions, honors
 explicit listen/standby, and stops upstream audio immediately for mute.
@@ -116,7 +122,7 @@ from harness failures. See `docs/contract-173-validation.md` for measured result
 
 ## Wake-word contract update #132
 
-The snapshot targets hermes-converse
+The assertions target hermes-converse
 `c28f7997bbce51d149bdf62e4c0624a3f80ad1f8` ([server PR #132](https://github.com/Keryxion/hermes-converse/pull/132)).
 The harness validates `ready.wake_word` when present and every `set_wake_word`
 frame, including phrase, engine names, model URLs and full SHA256 descriptors.
@@ -136,14 +142,21 @@ no wake detector and never reports successful model loading. Physical clients
 must separately verify continued detection during downloads, atomic model/phrase
 switches, rollback, the 30-second response deadline, cache reuse, and persistence
 across restart. Local HTTP corruption/authentication tests are negative controls
-for the harness, not evidence for physical client behavior. The exact spec
-snapshot comparison and all earlier contract tests remain in place.
+for the harness, not evidence for physical client behavior.
 
 Measured results and remaining failures: [wake-word validation](docs/wake-word-132-validation.md).
 
+## Default wake phrase update #196
+
+The assertions target hermes-converse
+`9db7a097e78145cb9421e4f86a4d316578ef145a` ([server PR #196](https://github.com/Keryxion/hermes-converse/pull/196)).
+Devices ship a bundled `Hey Arya` model, which is the phrase before any switch;
+the spec's switching examples use `Hey Sakura`. The live switch test therefore
+asks for `Hey Sakura` unless that is already configured. No wire format changed.
+
 ## Contract update #199
 
-The snapshot targets hermes-converse
+The assertions target hermes-converse
 `33a2e8258391c51b7aa04528b42736d9f6b327bc` ([server PR #199](https://github.com/Keryxion/hermes-converse/pull/199)).
 Every control frame the harness sends has a `type`. It commits with
 `{"type":"endpointing","commit":true}` and ends a session by closing the socket,
