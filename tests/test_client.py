@@ -133,6 +133,8 @@ def test_cursorless_replay_only_for_running_assistant():
 def test_ready_uses_negotiated_pcm_rate(requested,expected):
     c=Client('ws://invalid','unused',input_rate=requested)
     c.ready=dict(session_id='s',recipient_id='r',assistant_name='Arya',device_name=c.start['device_name'],
+                 current_model=dict(model=None, provider=None, reasoning_level=None, reasoning_override=None,
+                                    reasoning_support='unknown', reasoning_levels=[], pending=False),
                  transcripts=False,input=dict(sample_rate=expected,format='pcm16',block_ms=30),
                  output=dict(sample_rate=24000,format='pcm16'),server_recv_unix_ms=1,server_send_unix_ms=2)
     c._validate_ready()
@@ -240,3 +242,15 @@ async def test_close_sends_no_frame():
     c.ws=RecordingSocket()
     await c.close()
     assert c.ws.closed and c.ws.frames==[]
+
+
+@pytest.mark.parametrize('broken', [
+    {'reasoning_levels': ['high']}, {'reasoning_support': 'supported'}, {'reasoning_level': False},
+    {'pending': 1}, {'reasoning_levels': 'low'}, {'reasoning_support': 'maybe'},
+])
+def test_reasoning_validator_rejects_malformed_state(broken):
+    state = dict(model='free', provider=None, reasoning_support='unknown', reasoning_levels=[],
+                 reasoning_override=None, reasoning_level=None, pending=False)
+    Client._validate_current_model(state)
+    with pytest.raises(AssertionError):
+        Client._validate_current_model({**state, **broken})

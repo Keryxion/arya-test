@@ -78,6 +78,17 @@ class Client:
             await self.close()
             raise
 
+    @staticmethod
+    def _validate_current_model(state):
+        assert isinstance(state, dict), 'missing current_model'
+        for key in ('model', 'provider', 'reasoning_override', 'reasoning_level'):
+            assert key in state and (state[key] is None or isinstance(state[key], str)), key
+        assert type(state.get('pending')) is bool, 'missing reasoning pending state'
+        assert state.get('reasoning_support') in ('supported', 'unknown', 'unsupported')
+        levels = state.get('reasoning_levels')
+        assert isinstance(levels, list) and all(isinstance(v, str) and v for v in levels)
+        assert bool(levels) == (state['reasoning_support'] == 'supported')
+
     def _validate_ready(self):
         r = self.ready
         for k in ['session_id', 'recipient_id']:
@@ -91,6 +102,7 @@ class Client:
             validate_wake_word(r['wake_word'], self.start['wake_word_format'])
         else:
             assert 'wake_word' not in r, 'ready.wake_word sent to a device without wake_word_format'
+        self._validate_current_model(r.get('current_model'))
         fmt = self.start.get('audio_format', 'pcm16')
         for direction, requested in [('input', 'input_rate'), ('output', 'output_rate')]:
             rate = self.start[requested]
@@ -109,11 +121,24 @@ class Client:
         if isinstance(self.start.get('after'), str):
             assert type(r.get('new_session')) is bool
 
+    async def setting_command(self, name, args):
+        offset = len(self.events)
+        await self.send(type='command', name=name, args=args)
+        return await self.wait('command', after=offset, name=name, args=args)
+
+    async def current_model(self):
+        offset = len(self.events)
+        await self.send(type='current_model')
+        return (await self.wait('current_model', after=offset))['current_model']
+
     async def select_free(self):
-        rid = uuid.uuid4().hex
-        await self.send(type='set_model', request_id=rid, model='free')
-        e = await self.wait('model_changed', request_id=rid)
-        assert e['model'] == 'free' and e['uses_default'] is False and e['applies_to'] == 'next_turn'
+        catalog = self.ready.get('model_catalog', {})
+        provider = next((p['slug'] for p in catalog.get('providers', []) if 'free' in p['models']), None)
+        args = ['free', '--provider', provider, '--session'] if provider else ['free', '--session']
+        result = await self.setting_command('model', args)
+        state = result['current_model']
+        assert 'error' not in result and state['model'] == 'free' and not state['pending'], result
+        assert provider is None or state['provider'] == provider, state
 
     async def send(self, data=None, **kwargs):
         frame = data if data is not None else kwargs
@@ -170,6 +195,10 @@ class Client:
 
     def _validate(self, e, now):
         kind = e['type']
+        if kind == 'current_model' or (kind == 'command' and e.get('name') in ('model', 'reasoning')):
+            self._validate_current_model(e.get('current_model'))
+            if kind == 'command':
+                assert isinstance(e.get('reply'), str) != isinstance(e.get('error'), str), e
         if kind == 'set_wake_word':
             assert 'wake_word_format' in self.start, 'set_wake_word sent to a device without wake_word_format'
             validate_wake_word(e, self.start['wake_word_format'])
