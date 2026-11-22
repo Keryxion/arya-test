@@ -77,11 +77,14 @@ Standalone manual runs test whatever revision Penny is serving.
 | §9 outbound audio | Idle `say`, no synthetic user/wake event, standby, subsequent output after drain |
 | §10 countdowns | Real model-created countdown, fields/sounds, replay on reconnect, model cancellation/extension, test-owned cleanup |
 | §11 model | Catalog opt-in, display-only fields, free availability/selection, invalid IDs/choices, reset, selection during playback |
+| §12 Do Not Disturb | First frame after every `ready` (all connections), Boolean `on` without `turn_id`, new device off, device toggle not echoed, kept across reconnect and across assistants, non-Boolean `on` ignored both ways, own turn and `say` answered aloud while on, real-model on/off by voice sent to the device |
 
 Frame validation also checks approval requests/resolutions and tones whenever
 emitted. The suite does **not yet force** approval expiry/reconnect, provider
 failure/stall, deletion of a conversation from Hermes, scheduled outbound work,
-countdown snooze/multiple ringing. Ranked wake tie-breaks are checked when
+countdown snooze/multiple ringing, or Do Not Disturb holding of server-started
+output, approvals and tones after the grace, persistence across a server restart,
+or grace expiry. Ranked wake tie-breaks are checked when
 Penny enables selection; disabled selection is checked for grants instead. These
 remain coverage gaps, not passing evidence for those requirements. Model/STT
 semantic assertions can fail because the live model or transcription failed;
@@ -176,3 +179,17 @@ manual Talk, and the labelling and behaviour of a stop-listening control belong
 to a device; the server enforces none of them, and this headless harness has no
 Talk control. Physical clients must verify them separately. No check sends
 `cancel` and then closes the socket to confirm the turn is stopped.
+
+## Do Not Disturb contract update #149
+
+The assertions target hermes-converse `71cb7d40ff800bbe609ff0223b0f715f5fc5b763`
+([server PR #149](https://github.com/Keryxion/hermes-converse/pull/149)), built on
+merged #173. Every connection requires `do_not_disturb` as the first frame after
+`ready`; the frame must carry a Boolean `on` and no `turn_id`. Live checks toggle
+the setting only on unique test devices and always turn it off again.
+
+The harness has no trigger for server-started output (section 9), so it cannot
+check that reminders, their approvals and `play_tone` are held after the grace,
+that nothing is held within it, or that turning it on ends it; nor can it restart
+the server. Those remain coverage gaps. See
+[Do Not Disturb validation](docs/do-not-disturb-149-validation.md).

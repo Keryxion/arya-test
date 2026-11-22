@@ -58,6 +58,7 @@ class Client:
         self.ambient = None
         self.tasks = []
         self.ready = None
+        self.do_not_disturb = None
 
     async def connect(self, browser=False, select=True):
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
@@ -69,6 +70,7 @@ class Client:
             await self.send({**self.start, **({} if browser else {'key': self.key})})
             self.ready = await self.wait('ready')
             self._validate_ready()
+            await self.wait_ready_do_not_disturb()
             if self.start.get('audio_format') == 'opus':
                 self.encoder = Opus(self.ready['input']['sample_rate'], encode=True)
             if select:
@@ -108,6 +110,29 @@ class Client:
             assert 'model_catalog' not in r, 'unsolicited model inventory'
         if isinstance(self.start.get('after'), str):
             assert type(r.get('new_session')) is bool
+
+    async def wait_ready_do_not_disturb(self):
+        # Section 12: do_not_disturb is the first frame after every ready, on or off.
+        index = next(i for i, e in enumerate(self.events) if e['type'] == 'ready')
+        try:
+            async with asyncio.timeout(10):
+                while len(self.events) <= index + 1:
+                    self.changed.clear()
+                    if self.failure:
+                        raise self.failure
+                    assert not self.closed, f'socket closed ({self.ws.close_code}) before do_not_disturb after ready'
+                    await self.changed.wait()
+        except TimeoutError:
+            raise AssertionError('no do_not_disturb frame within 10 s after ready') from None
+        first = self.events[index + 1]
+        assert first['type'] == 'do_not_disturb', f'first frame after ready is {first["type"]}, not do_not_disturb'
+        return first['on']
+
+    async def barrier(self):
+        # A request/reply round trip: frames sent before it have been read by the server.
+        offset = len(self.events)
+        await self.send(type='commands')
+        await self.wait('commands', after=offset)
 
     async def select_free(self):
         rid = uuid.uuid4().hex
@@ -266,6 +291,10 @@ class Client:
         if kind == 'error':
             assert isinstance(e.get('error'), str) and e['error'], 'missing spoken-safe error'
             assert 'Traceback (most recent call last)' not in e['error'], 'internal traceback exposed'
+        if kind == 'do_not_disturb':
+            assert type(e.get('on')) is bool, 'do_not_disturb.on is not a Boolean'
+            assert 'turn_id' not in e, 'do_not_disturb carries a turn_id'
+            self.do_not_disturb = e['on']
         if kind == 'countdown':
             assert isinstance(e.get('countdown_id'), str) and e['countdown_id']
             assert type(e.get('deadline_unix_ms')) in (int, float)

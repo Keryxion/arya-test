@@ -240,3 +240,53 @@ async def test_close_sends_no_frame():
     c.ws=RecordingSocket()
     await c.close()
     assert c.ws.closed and c.ws.frames==[]
+
+
+@pytest.mark.parametrize('frame,error', [
+    (dict(type='do_not_disturb',on='true'),'not a Boolean'),
+    (dict(type='do_not_disturb',on=1),'not a Boolean'),
+    (dict(type='do_not_disturb'),'not a Boolean'),
+    (dict(type='do_not_disturb',on=True,turn_id='a'),'turn_id'),
+])
+def test_do_not_disturb_frame_validated(frame,error):
+    c=Client('ws://invalid','unused')
+    with pytest.raises(AssertionError,match=error):
+        emit(c,**frame)
+    assert c.do_not_disturb is None
+
+
+def test_do_not_disturb_frame_tracks_value():
+    c=Client('ws://invalid','unused')
+    emit(c,type='do_not_disturb',on=True)
+    assert c.do_not_disturb is True
+    emit(c,type='do_not_disturb',on=False)
+    assert c.do_not_disturb is False
+
+
+@pytest.mark.parametrize('after,closed,expected', [
+    ([dict(type='do_not_disturb',on=False)],False,None),
+    ([dict(type='model_changed')],False,'not do_not_disturb'),
+    ([dict(type='transcript',replay=True)],False,'not do_not_disturb'),
+    ([],True,'before do_not_disturb'),
+])
+async def test_do_not_disturb_must_follow_ready(after,closed,expected):
+    from types import SimpleNamespace
+    c=Client('ws://invalid','unused')
+    c.events=[dict(type='ready'),*after]
+    c.closed=closed
+    c.ws=SimpleNamespace(close_code=1006)
+    if expected is None:
+        assert await c.wait_ready_do_not_disturb() is False
+    else:
+        with pytest.raises(AssertionError,match=expected):
+            await c.wait_ready_do_not_disturb()
+
+
+async def test_missing_do_not_disturb_after_ready_is_named(monkeypatch):
+    import asyncio
+    c=Client('ws://invalid','unused')
+    c.events=[dict(type='ready')]
+    real=asyncio.timeout
+    monkeypatch.setattr(asyncio,'timeout',lambda s: real(.05))
+    with pytest.raises(AssertionError,match='no do_not_disturb frame'):
+        await c.wait_ready_do_not_disturb()
