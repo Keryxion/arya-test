@@ -102,11 +102,10 @@ async def test_attachment_replaced_and_recipient_stable(client):
     assert a.ready['session_id'] != b.ready['session_id']
 
 
-async def test_stop_closes_and_reconnects(client):
+async def test_closing_the_socket_keeps_the_conversation(client):
     a = await client()
-    await a.send(stop=True)
+    await a.ws.close()
     await asyncio.wait_for(a.reader, 10)
-    assert a.closed
     b = await client(device=a.start['device_name'])
     assert b.ready['recipient_id'] == a.ready['recipient_id']
 
@@ -235,7 +234,7 @@ async def test_quiet_uses_received_audio_not_wall_clock(client):
 
 async def test_empty_commit_and_say_are_ignored(client):
     c = await client()
-    await c.send(commit=True)
+    await c.send(type='endpointing', commit=True)
     for text in ['', '   ', None, 7]:
         await c.send(type='say',text=text)
     await c.quiet_for(1,{'thinking','speaking','turn_done'})
@@ -320,7 +319,6 @@ async def test_opus_setup_or_explicit_unavailability(live_config):
                 frame=await ws.receive_json()
                 if frame['type']=='ready':
                     assert frame['input']['format']==frame['output']['format']=='opus'
-                    await ws.send_json({'stop':True})
                 else:
                     assert frame=={'type':'error','error':'audio_unavailable'}
                     await ws.receive()
@@ -365,14 +363,6 @@ async def test_invalid_quiet_interval_disabled(client,value):
 async def test_nonstring_after_is_absent(client,value):
     c=await client(transcripts=True,after=value)
     assert 'new_session' not in c.ready
-
-
-@pytest.mark.parametrize('value', [1,'true','false',[],{}])
-async def test_truthy_stop_is_not_true(client,value):
-    c=await client()
-    await c.send(stop=value)
-    await c.quiet_for(.2,{'turn_done','interrupted'})
-    await c.select_free()
 
 
 async def test_malformed_and_unknown_controls_ignored(client):

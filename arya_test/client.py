@@ -327,7 +327,7 @@ class Client:
         if self.encoder:  # flush codec lookahead without resetting its stream state
             await self.pcm(bytes(self.start['input_rate']//50*2*3))
         if commit:
-            await self.send(commit=True)
+            await self.send(type='endpointing', commit=True)
         else:
             await self.pcm(bytes(self.start['input_rate']*2*5))
         self.ambient = asyncio.create_task(self._ambient())
@@ -381,8 +381,7 @@ class Client:
     async def close(self):
         await self.stop_ambient()
         if self.ws and not self.ws.closed:
-            with contextlib.suppress(Exception):
-                await self.send(stop=True)
+            # Closing the socket ends the session. No cancel: teardown is not a request to stop the assistant.
             await self.ws.close()
         if self.reader:
             await self.reader
