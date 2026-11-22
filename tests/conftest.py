@@ -45,3 +45,26 @@ async def client(live_config, request):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     setattr(item, 'rep_' + call.when, outcome.get_result())
+
+
+def pytest_terminal_summary(terminalreporter):
+    """Write reports/summary.md: the report ci/run.sh prints and posts."""
+    stats=terminalreporter.stats
+    reports={k:[r for r in stats.get(k,[]) if getattr(r,'when','call') in ('call','setup')] for k in ('passed','failed','error','skipped','xfailed','xpassed')}
+    reports['failed']+=reports.pop('error')
+    counts=', '.join(f'{len(v)} {k}' for k,v in reports.items() if v) or 'no tests ran'
+    reason=lambda r: (getattr(getattr(r.longrepr,'reprcrash',None),'message','') or str(r.longrepr)).strip().splitlines()[0][:200]
+    lines=[f"## {'❌' if reports['failed'] else '✅'} Arya live suite: {counts}",'',
+        f"Target `{os.environ.get('ARYA_URL','unset')}`, model `free`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`."]
+    root=Path(__file__).parents[1]
+    spec=os.environ.get('ARYA_SPEC_FILE')
+    if spec and Path(spec).read_bytes()!=(root/'specs/client.md').read_bytes():
+        lines+=['',f"⚠️ The deployed `specs/client.md` differs from the suite's snapshot (`{(root/'specs/revision').read_text().strip()[:12]}`): "
+            'failures may be the suite lagging the contract, not the server breaking it.']
+    for title,key in (('Failed','failed'),('Unexpectedly passing (drop the xfail)','xpassed')):
+        if reports[key]:
+            lines+=['',f'### {title}','']+[f'- `{r.nodeid}`: {reason(r)}' if key=='failed' else f'- `{r.nodeid}`' for r in reports[key]]
+    if os.environ.get('CI_PIPELINE_URL'):
+        lines+=['',f"[Full log]({os.environ['CI_PIPELINE_URL']})"]
+    Path('reports').mkdir(exist_ok=True)
+    Path('reports/summary.md').write_text('\n'.join(lines)+'\n')

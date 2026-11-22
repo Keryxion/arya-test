@@ -43,8 +43,16 @@ negative controls run without credentials: `python -m pytest tests/test_client.p
 
 `specs/client.md` is the contract snapshot; `specs/revision` records its upstream
 commit. Crow sets `ARYA_SPEC_FILE` to the triggering hermes-converse checkout's
-spec. A changed contract fails the check until its assertions and snapshot are
-reviewed together. Assertions follow the specification even when Penny disagrees.
+spec. A contract that differs from the snapshot does not fail the check: the
+report says so, because failures may then be the suite lagging the contract.
+Assertions follow the specification even when Penny disagrees.
+
+Each run writes `reports/summary.md`: the counts, every failure with its reason,
+and a link to the log. `ci/run.sh` prints it and `ci/post-report.py` posts it as
+one comment on the deployed hermes-converse pull request, replaced on each run.
+Posting needs `GITHUB_TOKEN` (pull-request write on hermes-converse) from the Crow
+secret `arya_report_github_token`; without a working token the report is only in
+the log, and the result of the check is unchanged.
 
 JUnit is written to `reports/junit.xml`. Sanitized per-test frame traces and audio
 byte counts are written to `reports/traces/`; no API key, start-auth frame, raw
