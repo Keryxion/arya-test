@@ -245,7 +245,7 @@ async def test_close_sends_no_frame():
 
 
 @pytest.mark.parametrize('broken', [
-    {'reasoning_levels': ['high']}, {'reasoning_support': 'supported'}, {'reasoning_level': False},
+    {'reasoning_support': 'supported'}, {'reasoning_level': False},
     {'pending': 1}, {'reasoning_levels': 'low'}, {'reasoning_support': 'maybe'},
 ])
 def test_reasoning_validator_rejects_malformed_state(broken):
@@ -254,3 +254,9 @@ def test_reasoning_validator_rejects_malformed_state(broken):
     Client._validate_current_model(state)
     with pytest.raises(AssertionError):
         Client._validate_current_model({**state, **broken})
+
+
+def test_unknown_reasoning_may_list_unconfirmed_levels():
+    Client._validate_current_model(dict(model='agent', provider='litellm', reasoning_support='unknown',
+                                        reasoning_levels=['low', 'high'], reasoning_override=None,
+                                        reasoning_level=None, pending=False))
