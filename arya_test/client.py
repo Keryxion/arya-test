@@ -87,7 +87,8 @@ class Client:
         assert state.get('reasoning_support') in ('supported', 'unknown', 'unsupported')
         levels = state.get('reasoning_levels')
         assert isinstance(levels, list) and all(isinstance(v, str) and v for v in levels)
-        assert bool(levels) == (state['reasoning_support'] == 'supported')
+        # unknown may list the levels the gateway accepts; only supported must confirm some.
+        assert levels or state['reasoning_support'] != 'supported', 'supported reasoning without levels'
 
     def _validate_ready(self):
         r = self.ready
