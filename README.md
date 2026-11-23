@@ -9,7 +9,8 @@ modules and mocks no server component. It sends synthesized microphone speech
 through real VAD, STT, model execution, and TTS, receives continuously, validates
 PCM16/20 ms mono Opus, and reports speaker drain at playback speed. Between
 utterances the synthetic microphone supplies room silence throughout an activation.
-Each connection selects `free` using `set_model` and waits for `model_changed`
+Each connection selects `free` with the session-scoped `model` command and verifies
+the route in the echoed command’s `current_model` snapshot
 before running a user turn. Test devices have unique `arya-test-*` names.
 
 ## Run
@@ -76,7 +77,7 @@ Standalone manual runs test whatever revision Penny is serving.
 | §8 wake | Correlated one-second decisions, exact phrase separation, invalid requests/signals; streaming without a wake claim |
 | §9 outbound audio | Idle `say`, no synthetic user/wake event, standby, subsequent output after drain |
 | §10 countdowns | Real model-created countdown, fields/sounds, replay on reconnect, model cancellation/extension, test-owned cleanup |
-| §11 model | Catalog opt-in, display-only fields, free availability/selection, invalid IDs/choices, reset, selection during playback |
+| §11 model | Catalog opt-in, display-only fields, free availability/selection, current model/effort readback, malformed commands, reset, selection during playback |
 
 Frame validation also checks approval requests/resolutions and tones whenever
 emitted. The suite does **not yet force** approval expiry/reconnect, provider

@@ -128,34 +128,22 @@ async def test_model_catalog(client):
         assert all(isinstance(m, str) and m for m in p['models'])
 
 
-@pytest.mark.parametrize('rid', [None, '', 'bad id', '\nsecret', 'x'*81, 7])
-async def test_bad_model_request_id(client, rid):
+async def test_model_command_reset(client):
     c = await client()
-    await c.send(type='set_model', request_id=rid, model='free')
-    e = await c.wait('model_error')
-    assert e == {'type':'model_error','error':'bad_request_id'}
+    result = await c.setting_command('model', ['reset'])
+    assert 'error' not in result and not result['current_model']['pending']
+    for field in ('model', 'provider'):
+        assert result['current_model'][field] == c.ready['current_model'][field]
+    assert result['current_model'] == await c.current_model()
     await c.select_free()
 
 
-@pytest.mark.parametrize('choice', [dict(model=''),dict(model='x'*257),dict(model='a\nb'),dict(model=5),
-                                    dict(model='free',provider=''),dict(model='free',provider='x'*81),
-                                    dict(model='free',provider='a\tb'),dict(model=None,provider='litellm')])
-async def test_bad_model_selection(client, choice):
-    c = await client()
-    await c.send(type='set_model', request_id='bad-model', **choice)
-    e = await c.wait('model_error', request_id='bad-model')
-    assert e['error'] == 'bad_model_selection'
-    await c.select_free()
-
-
-async def test_reset_model_is_connection_scoped(client):
-    c = await client()
-    offset = len(c.events)
-    await c.send(type='set_model',request_id='reset',model=None,provider=None)
-    e = await c.wait('model_changed', request_id='reset')
-    assert e['uses_default'] is True and e['applies_to'] == 'next_turn'
-    assert not any(x['type'] in ('thinking','wake_grant','wake_deny') for x in c.events[offset:])
-    await c.select_free()
+@pytest.mark.parametrize('name', ['model', 'reasoning'])
+async def test_malformed_setting_command_returns_current_model(client, name):
+    c = await client(select=False)
+    result = await c.setting_command(name, [42])
+    assert result['error'] == 'bad_command' and 'reply' not in result
+    assert result['current_model'] == await c.current_model()
 
 
 @pytest.mark.parametrize('frame', [dict(claim_id='',wake_word='Hey Arya'),dict(claim_id='x',wake_word=''),
@@ -200,7 +188,7 @@ async def test_commands_catalog(client):
 async def test_bad_command(client, frame):
     c = await client()
     await c.send(type='command',**frame)
-    e = await c.wait('command')
+    e = await c.wait('command', name=frame['name'])
     assert e.get('error')=='bad_command' and 'reply' not in e
     await c.select_free()
 
@@ -208,7 +196,7 @@ async def test_bad_command(client, frame):
 async def test_unknown_command(client):
     c = await client()
     await c.send(type='command',name='arya_test_nonexistent_command')
-    assert (await c.wait('command'))['error']=='unknown_command'
+    assert (await c.wait('command', name='arya_test_nonexistent_command'))['error']=='unknown_command'
 
 
 async def test_new_command_reconnect(client):
@@ -249,7 +237,7 @@ async def test_invalid_wake_signals_treated_as_missing(client, signal):
 
 async def test_title_command_keeps_socket(client):
     c=await client()
-    await c.send(type='command',name='title',args=c.start['device_name'])
+    await c.send(type='command',name='title',args=[c.start['device_name']])
     e=await c.wait('command',name='title')
     assert isinstance(e.get('reply'),str) and 'error' not in e
     await c.select_free()
@@ -382,3 +370,24 @@ async def test_cancel_without_turn_sends_no_terminal_frames(client):
     c=await client(transcripts=True)
     await c.send(type='cancel')
     await c.quiet_for(.3,{'interrupted','turn_done','transcript'})
+
+
+async def test_reasoning_snapshot_without_catalog(client):
+    c = await client(models=False, select=False)
+    assert 'model_catalog' not in c.ready
+    assert c.ready['current_model'] == await c.current_model()
+
+
+async def test_reasoning_read_write_and_reset(client):
+    c = await client(select=False)
+    initial = c.ready['current_model']
+    if initial['reasoning_levels']:
+        level = initial['reasoning_levels'][-1]
+        result = await c.setting_command('reasoning', [level])
+        state = result['current_model']
+        assert 'error' not in result and state['reasoning_override'] == level and not state['pending']
+        assert state == await c.current_model()
+    reset = await c.setting_command('reasoning', ['reset'])
+    state = reset['current_model']
+    assert 'error' not in reset and state['reasoning_override'] is None and not state['pending']
+    assert state == await c.current_model()
