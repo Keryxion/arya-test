@@ -125,8 +125,12 @@ The assertions target hermes-converse
 `c28f7997bbce51d149bdf62e4c0624a3f80ad1f8` ([server PR #132](https://github.com/Keryxion/hermes-converse/pull/132)).
 The harness validates `ready.wake_word` when present and every `set_wake_word`
 frame, including phrase, engine names, model URLs and full SHA256 descriptors.
-The configured live target must advertise downloadable models. The suite rejects
-missing/incorrect HTTP credentials, verifies the advertised manifest/ONNX bytes,
+When `ready` advertises bundled `Hey Arya` with an empty model map, the
+download-only checks explicitly skip: no download or later `set_wake_word` is
+required. Ready-frame validation still runs, but a skip is a gap in live download
+coverage. A target offering models is needed to exercise that coverage.
+For offered models, the suite rejects missing/incorrect HTTP credentials,
+verifies the advertised manifest/ONNX bytes,
 and fetches the manifest-relative TFLite file with the same key. The contract
 hash covers the manifest; it does not advertise a separate TFLite hash.
 
