@@ -102,7 +102,8 @@ Verified current state (14:00–14:10 UTC):
 - Entry checkout clean, branch `improve/live-report-diagnostics`, `cf70a84`.
   GitHub suite main now `e0d540fa9043`; yesterday's diagnostics/bundled-wake
   changes merged via #13, with report date added in #15. No duplication.
-- Server #204 remains merged as `65fce55e72ec`. Current main is `50f6c0bfef22`.
+- Server #204 remains merged as `65fce55e72ec`. Main at the independent audit was `5145dec4741b` (merged tone PR #223);
+  `50f6c0bfef22` was #179's base, not current main.
 - Latest Penny deployment 8056791920 targets PR #179 head `77627de12828`.
   GitHub deployment status is failure and links Crow 230; this alone does not
   mean deployment failed. Latest report explicitly ran suite `e0d540fa9043`:
@@ -155,3 +156,18 @@ Independent audit reviewed before closing:
   authorization, and rebase #179; preserve current assertions. #224 now also
   conflicts with main. No extra live load or server modifications performed.
 - This run coordinated through the [Paseo skill](/Users/dturner/.agents/skills/paseo/SKILL.md).
+
+Additional completed audit evidence:
+- [Crow 226](https://crow.tail707a6.ts.net/repos/8/pipeline/226), server
+  `831e789c263f`, suite `e0d540fa9043`: **210 passed, 3 failed, 2 skipped**.
+  Reset returned 1006 instead of 4410; barge-in waited 40 seconds for
+  `interrupted`; the model-driven wake switch waited 120 seconds for
+  `set_wake_word`. This last failure is distinct from the bundled download
+  coverage skips; it remains unclassified without model/tool trace evidence.
+- [Crow 223](https://crow.tail707a6.ts.net/repos/8/pipeline/223), server
+  `5acc77a9f6b9`, suite `1bdcc7e88d70`: **211 passed, 2 failed, 2 skipped**.
+  Barge-in and the model-driven wake switch failed. These runs supply newer
+  evidence than yesterday's local reproductions; Crow 230 masks their status.
+- Audit compared #179 with main: diverged, main has 15 unique commits and
+  deployed branch two. This confirms outdated alpha deployment rather than an
+  intentional removal of current_model from main's contract.
