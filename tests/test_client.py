@@ -141,11 +141,12 @@ def test_reconnect_snapshot_and_carried_counters():
     emit(c,type='turn_done',turn_id='a')
 
 
-def test_resume_without_reply_text_is_inferred_from_state():
+def test_resume_without_reply_text_carries_its_counters():
     """Reconnecting during a turn: the running-text snapshot appears only when
     the turn already has reply text, and the thinking counters carry on from
     where they were rather than restarting at zero."""
-    c=Client('ws://invalid','unused',transcripts=True)
+    c=Client('ws://invalid','unused',transcripts=True,
+             resume=dict(turn_id='turn-41',tool_calls=3,reasoning_tokens=2400))
     emit(c,type='transcript',turn_id='turn-41',role='user',text='hello',message_id='m-123',replay=True)
     emit(c,type='state',turn_id='turn-41',state='thinking')
     assert c.snapshot_turn is None and c.turns['turn-41'].resumed
@@ -153,6 +154,16 @@ def test_resume_without_reply_text_is_inferred_from_state():
     emit(c,type='transcript',turn_id='turn-41',role='assistant',text='Two things tomorrow.')
     emit(c,type='transcript',turn_id='turn-41',role='assistant',text='',message_id='m-124')
     emit(c,type='turn_done',turn_id='turn-41')
+
+
+def test_a_turn_opened_by_state_must_still_reset_its_counters():
+    """The server opens every turn with `state` then `thinking`: that is a
+    turn starting, not a resume, and its counters open at zero."""
+    c=Client('ws://invalid','unused')
+    emit(c,type='state',turn_id='a',state='thinking')
+    assert not c.turns['a'].resumed
+    with pytest.raises(AssertionError,match='initial counters not reset'):
+        emit(c,type='thinking',turn_id='a',tool_calls=3,reasoning_tokens=2400)
 
 
 def test_a_turn_seen_from_its_start_must_reset_its_counters():
@@ -355,3 +366,23 @@ def test_unknown_reasoning_may_list_unconfirmed_levels():
     Client._validate_current_model(dict(model='agent', provider='litellm', reasoning_support='unknown',
                                         reasoning_levels=['low', 'high'], reasoning_override=None,
                                         reasoning_level=None, pending=False))
+
+
+@pytest.mark.parametrize('providers,refused,outcome', [
+    ([], True, None),                                                  # nothing advertised, refused: default stands
+    ([dict(slug='p',name='P',models=['other'])], True, None),         # not offered: never asked
+    ([dict(slug='p',name='P',models=['free'])], False, 'selected'),
+    ([dict(slug='p',name='P',models=['free'])], True, 'fail'),        # offered, then refused
+])
+def test_select_model_only_tolerates_a_model_nobody_offered(providers, refused, outcome):
+    c=Client('ws://invalid','unused')
+    c.ready=dict(model_catalog=dict(providers=providers))
+    state=dict(model='default' if refused else 'free',provider='p',pending=False)
+    async def command(name, args):
+        return dict(current_model=state, **({'error':'refused'} if refused else {}))
+    c.setting_command=command
+    if outcome=='fail':
+        with pytest.raises(AssertionError):
+            asyncio.run(c.select_model('free'))
+    else:
+        assert asyncio.run(c.select_model('free')) == (state if outcome else None)

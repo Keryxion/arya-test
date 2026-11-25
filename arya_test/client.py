@@ -167,8 +167,9 @@ class Client:
         args = [model, '--provider', provider, '--session'] if provider else [model, '--session']
         result = await self.setting_command('model', args)
         state = result['current_model']
-        if 'error' in result:
-            return None  # the server does not run this model; its default stands
+        if 'error' in result and provider is None:
+            return None  # nothing advertised it and the server refused; its default stands
+        assert 'error' not in result, result  # the catalog offered it, so refusing is a failure
         assert state['model'] == model and not state['pending'], result
         assert provider is None or state['provider'] == provider, state
         return state
@@ -258,16 +259,12 @@ class Client:
         if kind in {'thinking', 'speaking', 'state', 'transcript', 'interrupted', 'turn_done'} or (kind == 'error' and 'turn_id' in e):
             tid = e.get('turn_id')
             assert isinstance(tid, str) and tid, f'{kind} missing turn_id'
-            fresh = tid not in self.turns
             t = self.turns.setdefault(tid, Turn())
-            if fresh and kind == 'state':
-                # "Reconnecting during a turn": a turn still running resumes
-                # with `state` and then `thinking` whose counters carry on from
-                # where they were. The running-text snapshot of step 2 is sent
-                # only when the turn already has reply text, so a `state` that
-                # opens a turn this connection never saw start is the only
-                # resume signal there is. A mid-turn `state`, such as an
-                # approval's, belongs to a turn already seen and is not one.
+            # "Reconnecting during a turn": the server opens every turn with
+            # `state` then `thinking`, so a resume with no reply text looks on
+            # the wire like a turn starting. Only the test that reconnected
+            # mid-turn knows which it is, and says so with `resume=`.
+            if self.resume and tid == self.resume['turn_id']:
                 t.resumed = True
             if t.resumed and not t.saw_thinking and kind not in ('state', 'thinking'):
                 raise AssertionError('resumed live frame before state and thinking')
