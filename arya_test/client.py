@@ -174,6 +174,10 @@ class Client:
         assert provider is None or state['provider'] == provider, state
         return state
 
+    def expect_announcement(self):
+        """The next turn is an announcement: prepared speech with no transcript (section 9)."""
+        self.transient_turns.add(None)
+
     async def send(self, data=None, **kwargs):
         frame = data if data is not None else kwargs
         if frame.get('type') == 'say' and isinstance(frame.get('text'), str) and frame['text'].strip():
@@ -293,6 +297,10 @@ class Client:
                 assert e.get('state') in ('thinking', 'speaking', 'listening')
             elif kind == 'speaking':
                 assert not t.done and not t.interrupted
+                if None in self.transient_turns and not t.saw_thinking and not t.speaking:
+                    # An announcement is prepared speech: `speaking` may open its turn.
+                    self.transient_turns.remove(None)
+                    self.transient_turns.add(tid)
                 assert self.active_audio in (None, tid), 'interleaved untagged audio'
                 if not t.speaking and self.start.get('audio_format') == 'opus':
                     t.decoder = Opus(self.start['output_rate'])
@@ -346,6 +354,12 @@ class Client:
             assert type(e.get('deadline_unix_ms')) in (int, float)
             assert type(e.get('ring_seconds')) in (int, float) and e['ring_seconds'] > 0
             assert e.get('sound') in ('alarm-1', 'alarm-2', 'alarm-3', 'alarm-4')
+        if kind == 'controls':
+            # Section 12: the server sends only the fields to change.
+            assert {'muted', 'volume'} & e.keys(), 'controls with nothing to set'
+            assert type(e.get('muted', False)) is bool, 'controls.muted is not a Boolean'
+            volume = e.get('volume', 0)
+            assert type(volume) in (int, float) and 0 <= volume <= 1, 'controls.volume is not a number from 0 to 1'
         if kind == 'tone':
             assert e.get('tone') in ('confirm', 'error', 'approval') and 'turn_id' not in e
         if kind == 'approval_request':

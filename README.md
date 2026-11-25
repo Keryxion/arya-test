@@ -45,7 +45,8 @@ negative controls run without credentials: `python -m pytest tests/test_client.p
 
 ## Contract and reports
 
-The contract is hermes-converse `specs/client.md`. This repository keeps no copy
+The contract is hermes-converse `specs/client.md`, and `specs/admin.md` for the
+admin socket. This repository keeps no copy
 of it: a test names the section it checks, and a contract change is followed by a
 change to the tests, not to a snapshot. Assertions follow the specification even
 when Penny disagrees.
@@ -81,6 +82,8 @@ Standalone manual runs test whatever revision Penny is serving.
 | §9 outbound audio | Idle `say`, no synthetic user/wake event, standby, subsequent output after drain |
 | §10 countdowns | Real model-created countdown, fields/sounds, replay on reconnect, model cancellation/extension, test-owned cleanup |
 | §11 model | Catalog opt-in and shape, display-only fields, selection of the configured model, current model/effort readback, malformed commands, reset, selection during playback |
+| §12 mute and volume | A device's `controls` reports as the admin socket's `muted`/`volume`, a report with no `volume`, both `null` once it detaches; the server's `controls` frame carries only the fields a `set` gave, one frame per `set` |
+| `specs/admin.md` | Missing/wrong key refused with 401 before the upgrade, `devices` first, entry fields and types, `device` on first connection/report/detach, `set` answered with the device's own report (applied, changed by the device, unanswered after 2 s), `not_attached`, `unknown_device`, `bad_request`, no answer without a string `request_id`, `announce` to one name in an array or alone, unknown name in `skipped`, no `target` when only test devices are attached |
 
 Frame validation also checks approval requests/resolutions and tones whenever
 emitted. The suite does **not yet force** approval expiry/reconnect, provider
@@ -184,3 +187,33 @@ manual Talk, and the labelling and behaviour of a stop-listening control belong
 to a device; the server enforces none of them, and this headless harness has no
 Talk control. Physical clients must verify them separately. No check sends
 `cancel` and then closes the socket to confirm the turn is stopped.
+
+## Contract update #229
+
+The assertions target hermes-converse
+`b8f0ae87c2f1b29ad7818c5ce0505911b67ed2a1` ([server PR #229](https://github.com/Keryxion/hermes-converse/pull/229)).
+`tests/test_admin.py` opens the admin socket at `/v1/audio/admin` on the host of
+`ARYA_URL`, with the same API key, while the suite's client plays the device.
+
+Live checks: a missing or wrong key gets 401 and no socket; the first frame is
+`devices`; a device's `controls` reports reach the admin connection, and `muted`
+and `volume` are `null` before it reports and after it detaches; a `set` sends the
+device one `controls` frame with exactly the fields given and is answered with what
+the device reported, whether it applied the change, chose another value, or did
+not answer within 2 s; `not_attached`, `unknown_device` and `bad_request`; a
+frame without a string `request_id` gets no result; an announcement to a named
+device plays there as speech with no `transcript` and no wake event, plays on no
+other device, and lists an unknown name in `skipped`.
+
+An announcement with no `target` speaks on every attached device, and the suite
+runs against servers with real devices in rooms. That check sends it only when
+every attached device is an `arya-test-*` one, and otherwise reports a skip, which
+is a gap in coverage. Every other announcement names its test device.
+
+Not checked: the announcement tone at the start of the audio, which would need the
+suite to render `tones.md` itself; an announcement waiting behind a reply; removal
+after 30 days and `device_removed`, which cannot be driven from outside the server;
+`address`, beyond being a string or `null`; the agent's `announce` tool; that a
+change reaches every admin connection, since each test opens one. How a device
+applies a `controls` frame is device behaviour: the headless client answers with
+whatever the test tells it to.
