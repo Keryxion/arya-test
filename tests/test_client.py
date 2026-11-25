@@ -125,6 +125,24 @@ def test_say_does_not_emit_transcripts():
         emit(c,type='transcript',turn_id='a',role='assistant',text='hello')
 
 
+def test_an_announcement_opened_by_speaking_emits_no_transcripts():
+    c=Client('ws://invalid','unused',transcripts=True)
+    c.expect_announcement()
+    emit(c,type='speaking',turn_id='a')
+    c._audio(b'\1\0',time.monotonic())  # audio with no reply text before it is allowed
+    with pytest.raises(AssertionError,match='say emitted'):
+        emit(c,type='transcript',turn_id='a',role='assistant',text='hello')
+
+
+@pytest.mark.parametrize('frame', [dict(), dict(muted='yes'), dict(muted=1), dict(volume=1.01), dict(volume=True), dict(muted=True,volume=None)])
+def test_validator_rejects_malformed_controls(frame):
+    c=Client('ws://invalid','unused')
+    for good in (dict(muted=True), dict(volume=0), dict(muted=False,volume=0.4)):
+        c._validate({'type':'controls',**good},0)
+    with pytest.raises(AssertionError,match='controls'):
+        c._validate({'type':'controls',**frame},0)
+
+
 def test_reconnect_snapshot_and_carried_counters():
     c=Client('ws://invalid','unused',transcripts=True,
              resume=dict(turn_id='a',tool_calls=3,reasoning_tokens=100))
