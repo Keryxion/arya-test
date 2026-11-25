@@ -24,18 +24,20 @@ def test_validator_rejects_liveness_after_done():
 
 
 @pytest.mark.parametrize('value', ['invalid','Listen','',None,7])
-def test_unknown_next_action_is_treated_as_absent(value):
-    """Section 4: listen, standby and mute are the only values; any other is absent."""
+def test_unknown_next_action_is_rejected_and_treated_as_absent(value):
+    """Section 4: the server sends no other value; a client treats one as absent."""
     c=Client('ws://invalid','unused')
-    emit(c,type='turn_done',turn_id='a',next_action=value)
+    with pytest.raises(AssertionError,match='invalid next_action'):
+        c._validate({'type':'turn_done','turn_id':'a','next_action':value},0)
     assert c.turns['a'].action is None
 
 
-def test_an_interrupted_turn_may_carry_an_unknown_next_action():
+@pytest.mark.parametrize('value', ['standby','invalid'])
+def test_an_interrupted_turn_carries_no_next_action(value):
     c=Client('ws://invalid','unused')
-    emit(c,type='interrupted',turn_id='a')
-    emit(c,type='turn_done',turn_id='a',next_action='invalid')
-    assert c.turns['a'].action is None
+    c._validate({'type':'interrupted','turn_id':'a'},0)
+    with pytest.raises(AssertionError):
+        c._validate({'type':'turn_done','turn_id':'a','next_action':value},0)
 
 
 def test_validator_rejects_unsolicited_transcripts():
@@ -206,7 +208,7 @@ def test_resumed_reply_needs_thinking_before_live_text():
         emit(c,type='transcript',turn_id='a',role='assistant',text='world')
 
 
-@pytest.mark.parametrize('action,activation,expected', [(None,True,True),(None,False,False),('standby',True,False),('listen',False,True),('invalid',True,True),('invalid',False,False)])
+@pytest.mark.parametrize('action,activation,expected', [(None,True,True),(None,False,False),('standby',True,False),('listen',False,True)])
 async def test_playback_drain_preserves_or_changes_activation(action,activation,expected):
     c=Client('ws://invalid','unused')
     sent=[]

@@ -319,12 +319,16 @@ class Client:
             elif kind == 'error':
                 t.failed = True
             elif kind == 'turn_done':
-                # "Handling `turn_done.next_action`": listen, standby and mute
-                # are the only values and any other is treated as absent.
+                # "Handling `turn_done.next_action`": the server sends only
+                # listen, standby or mute, and never on a failed or interrupted
+                # turn. A client treats any other value as absent, so that is
+                # what the drain acts on, but sending one is the server's fault.
                 action = e.get('next_action')
                 t.action = action if action in ('listen', 'standby', 'mute') else None
+                if 'next_action' in e:
+                    assert t.action is not None, 'invalid next_action'
                 if t.interrupted or t.failed:
-                    assert t.action is None, 'terminal failure/interruption carries action'
+                    assert 'next_action' not in e, 'terminal failure/interruption carries action'
                 if self.pending_interruption == tid:
                     self.pending_interruption = None
                 turn_events = [x for x in self.events if x.get('turn_id') == tid]
