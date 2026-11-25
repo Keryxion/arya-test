@@ -1,17 +1,19 @@
 # arya-test
 
-Independent, headless client-contract checks for the **live Penny server**, using
-**model `free`**. This repository owns the tests; hermes-converse's Crow
-workflow clones it and reports the result after each successful Penny deployment.
+Independent, headless client-contract checks for the **live Penny server**. This
+repository owns the tests; hermes-converse's Crow workflow clones it and reports
+the result after each successful Penny deployment.
 
 The client uses only the documented WebSocket protocol. It imports no server
 modules and mocks no server component. It sends synthesized microphone speech
 through real VAD, STT, model execution, and TTS, receives continuously, validates
 PCM16/20 ms mono Opus, and reports speaker drain at playback speed. Between
 utterances the synthetic microphone supplies room silence throughout an activation.
-Each connection selects `free` with the session-scoped `model` command and verifies
-the route in the echoed command’s `current_model` snapshot
-before running a user turn. Test devices have unique `arya-test-*` names.
+Each connection pins a chat model with the session-scoped `model` command and
+verifies the route in the echoed command’s `current_model` snapshot before
+running a user turn. The model is `ARYA_MODEL`, `free` by default: `specs/client.md`
+names no model, so a server that does not offer this one keeps its own default
+instead of failing the run. Test devices have unique `arya-test-*` names.
 
 ## Run
 
@@ -22,6 +24,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install .
 export ARYA_URL=wss://penny.z13.org/v1/audio/converse
+export ARYA_MODEL=free   # optional; empty leaves the server's own default
 # Set ARYA_API_KEY through your secret manager, without committing it.
 python -m pytest --junitxml=reports/junit.xml
 ```
@@ -71,13 +74,13 @@ Standalone manual runs test whatever revision Penny is serving.
 | §1 authentication | Both auth paths, secret subprotocol not echoed, missing/bad keys, invalid first JSON/binary frames |
 | §2 start and reconnect | Required/forbidden names, PCM and Opus rate matrix, invalid codec/rates, ready identities/timestamps, malformed Opus, 4503 refusal/PCM fallback, name/rate validation, attachment replacement, reconnect identity |
 | §3 controls/commands | Typed `endpointing` commit ends an utterance, exact-true commit, `on` applied beside a non-true commit, empty commit, closing the socket keeps the conversation, cancellation during capture and current/stale cancellation, command catalog, invalid/unknown commands, title/new, say/empty say |
-| §4 lifecycle/transcripts | Real speech and synthetic outbound speech, turn IDs, optional listen/standby/mute actions, ordered interruption/audio, text before audio, pacing, carried reconnect counters/text snapshot, opt-in transcripts, closing cursor, history/replay identity, barge-in |
+| §4 lifecycle/transcripts | Real speech and synthetic outbound speech, turn IDs, optional listen/standby/mute actions and no other value, ordered interruption/audio, text before audio, pacing, carried reconnect counters with an optional text snapshot, approvals suspending the suite's own turn limit for inactivity, opt-in transcripts, closing cursor, history/replay identity, barge-in |
 | §5 silence | No wall-clock quiet, quiet from received samples. The quiet threshold and the longer wait after Talk are device behaviour and are not checked |
 | §6–7 flow and IDs | Real automatic endpointing and forced endpointing, repeated turns, turn correlation |
 | §8 wake | Correlated one-second decisions, exact phrase separation, invalid requests/signals; streaming without a wake claim |
 | §9 outbound audio | Idle `say`, no synthetic user/wake event, standby, subsequent output after drain |
 | §10 countdowns | Real model-created countdown, fields/sounds, replay on reconnect, model cancellation/extension, test-owned cleanup |
-| §11 model | Catalog opt-in, display-only fields, free availability/selection, current model/effort readback, malformed commands, reset, selection during playback |
+| §11 model | Catalog opt-in and shape, display-only fields, selection of the configured model, current model/effort readback, malformed commands, reset, selection during playback |
 
 Frame validation also checks approval requests/resolutions and tones whenever
 emitted. The suite does **not yet force** approval expiry/reconnect, provider
@@ -135,7 +138,7 @@ and fetches the manifest-relative TFLite file with the same key. The contract
 hash covers the manifest; it does not advertise a separate TFLite hash.
 
 Live result checks send all four documented error values and confirm the socket
-remains usable. A speech test asks the real `free` model to change the test-owned
+remains usable. A speech test asks the configured model to change the test-owned
 device's phrase to a different one, validates the resulting `set_wake_word`, and reports `load_failed`
 on that socket. It fails if the model does not invoke the tool. There is no
 undocumented tool-invocation or configuration endpoint in this harness.

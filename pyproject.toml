@@ -17,4 +17,4 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "-ra --tb=short"
-markers = ["live: uses the live Penny server", "speech: runs real STT, free model and TTS"]
+markers = ["live: uses the live Penny server", "speech: runs real STT, the selected model and TTS"]

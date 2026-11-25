@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import json
+import os
 import time
 import uuid
 import unicodedata
@@ -11,6 +12,11 @@ import aiohttp
 
 from .audio import Opus, speech
 from .wake import validate_wake_word
+
+# specs/client.md names no particular chat model, so the one the suite pins for
+# cheap, repeatable turns is configuration, not contract. A server that does not
+# offer it keeps its own default instead of failing the run.
+MODEL = os.environ.get('ARYA_MODEL', 'free')
 
 
 class AudioUnavailable(Exception):
@@ -24,6 +30,7 @@ class Turn:
     done: dict | None = None
     interrupted: bool = False
     failed: bool = False
+    action: str | None = None
     resumed: bool = False
     saw_thinking: bool = False
     resume_state: bool = False
@@ -36,6 +43,13 @@ class Turn:
 
 
 class Client:
+    # An absolute limit of our own on an ordinary turn. It is suspended while an
+    # approval is pending and restarts when one resolves (see `wait`).
+    TURN_LIMIT = 160
+    # `thinking` arrives about every 5 s, so this is the inactivity limit that
+    # replaces TURN_LIMIT during an approval wait.
+    APPROVAL_INACTIVITY = 30
+
     def __init__(self, url, key, device=None, resume=None, **start):
         self.url, self.key = url, key
         self.start = dict(type='start', assistant_name='Arya', device_name=device or f'arya-test-{uuid.uuid4().hex}',
@@ -43,6 +57,9 @@ class Client:
         self.start.update(start)
         self.events, self.turns = [], {}
         self.pending_interruption = None
+        self.pending_approvals = {}
+        self.approval_epoch = 0
+        self.last_frame = time.monotonic()
         self.resume = resume
         self.snapshot_turn = None
         self.activation = False
@@ -72,7 +89,7 @@ class Client:
             if self.start.get('audio_format') == 'opus':
                 self.encoder = Opus(self.ready['input']['sample_rate'], encode=True)
             if select:
-                await self.select_free()
+                await self.select_model()
             return self
         except BaseException:
             await self.close()
@@ -132,14 +149,30 @@ class Client:
         await self.send(type='current_model')
         return (await self.wait('current_model', after=offset))['current_model']
 
-    async def select_free(self):
+    async def select_model(self, model=None):
+        """Pin the configured chat model for this session (section 11).
+
+        Section 11 names no model, so a server that does not offer this one is
+        conforming: leave its own default in place rather than failing. When the
+        selection is made, the echoed `current_model` must confirm it.
+        """
+        model = MODEL if model is None else model
+        if not model:
+            return None
         catalog = self.ready.get('model_catalog', {})
-        provider = next((p['slug'] for p in catalog.get('providers', []) if 'free' in p['models']), None)
-        args = ['free', '--provider', provider, '--session'] if provider else ['free', '--session']
+        providers = catalog.get('providers', [])
+        provider = next((p['slug'] for p in providers if model in p['models']), None)
+        if providers and provider is None:
+            return None  # the advertised catalog does not offer it
+        args = [model, '--provider', provider, '--session'] if provider else [model, '--session']
         result = await self.setting_command('model', args)
         state = result['current_model']
-        assert 'error' not in result and state['model'] == 'free' and not state['pending'], result
+        if 'error' in result and provider is None:
+            return None  # nothing advertised it and the server refused; its default stands
+        assert 'error' not in result, result  # the catalog offered it, so refusing is a failure
+        assert state['model'] == model and not state['pending'], result
         assert provider is None or state['provider'] == provider, state
+        return state
 
     async def send(self, data=None, **kwargs):
         frame = data if data is not None else kwargs
@@ -150,7 +183,7 @@ class Client:
     async def _read(self):
         try:
             async for msg in self.ws:
-                now = time.monotonic()
+                now = self.last_frame = time.monotonic()
                 if msg.type == aiohttp.WSMsgType.BINARY:
                     self._audio(msg.data, now)
                 elif msg.type == aiohttp.WSMsgType.TEXT:
@@ -163,7 +196,7 @@ class Client:
                     self.events.append(e)
                     if e['type'] == 'speaking':
                         await self.send(type='state', turn_id=e['turn_id'], state='speaking')
-                    if e['type'] == 'turn_done' and e.get('next_action') == 'mute':
+                    if e['type'] == 'turn_done' and self.turns[e['turn_id']].action == 'mute':
                         self.muted, self.activation = True, False
                         await self.stop_ambient()
                     if e['type'] == 'turn_done':
@@ -227,6 +260,10 @@ class Client:
             tid = e.get('turn_id')
             assert isinstance(tid, str) and tid, f'{kind} missing turn_id'
             t = self.turns.setdefault(tid, Turn())
+            # "Reconnecting during a turn": the server opens every turn with
+            # `state` then `thinking`, so a resume with no reply text looks on
+            # the wire like a turn starting. Only the test that reconnected
+            # mid-turn knows which it is, and says so with `resume=`.
             if self.resume and tid == self.resume['turn_id']:
                 t.resumed = True
             if t.resumed and not t.saw_thinking and kind not in ('state', 'thinking'):
@@ -279,8 +316,14 @@ class Client:
             elif kind == 'error':
                 t.failed = True
             elif kind == 'turn_done':
+                # "Handling `turn_done.next_action`": the server sends only
+                # listen, standby or mute, and never on a failed or interrupted
+                # turn. A client treats any other value as absent, so that is
+                # what the drain acts on, but sending one is the server's fault.
+                action = e.get('next_action')
+                t.action = action if action in ('listen', 'standby', 'mute') else None
                 if 'next_action' in e:
-                    assert e['next_action'] in ('listen', 'standby', 'mute'), 'invalid next_action'
+                    assert t.action is not None, 'invalid next_action'
                 if t.interrupted or t.failed:
                     assert 'next_action' not in e, 'terminal failure/interruption carries action'
                 if self.pending_interruption == tid:
@@ -291,6 +334,8 @@ class Client:
                     assert pieces and pieces[-1].get('message_id') and pieces[-1]['text']=='', 'assistant reply missing closing transcript cursor'
                     assert sum(bool(x.get('message_id')) for x in pieces)==1, 'duplicate assistant closing cursor'
                 t.done = e
+                for approval in [a for a, turn in self.pending_approvals.items() if turn == tid]:
+                    self._approval_settled(approval)
                 if self.active_audio == tid:
                     self.active_audio = None
         if kind == 'error':
@@ -307,26 +352,50 @@ class Client:
             assert e.get('approval_id') and e.get('turn_id')
             assert isinstance(e.get('summary'), str) and isinstance(e.get('command'), str)
             assert e.get('choices') and set(e['choices']) <= {'once', 'session', 'always', 'deny'}
+            # A reconnect repeats a still-pending approval under the same id.
+            self.pending_approvals[e['approval_id']] = e['turn_id']
         if kind == 'approval_resolved':
             assert e.get('approval_id') and e.get('outcome') in ('approved', 'denied', 'expired', 'cancelled')
+            self._approval_settled(e['approval_id'])
+
+    def _approval_settled(self, approval_id):
+        """Drop a pending approval and restart any absolute limit from zero."""
+        if self.pending_approvals.pop(approval_id, None) is not None:
+            self.approval_epoch += 1
+            self.changed.set()
 
     async def wait(self, kind, *, after=0, timeout=25, **fields):
-        async with asyncio.timeout(timeout):
-            while True:
-                self.changed.clear()
-                if self.failure:
-                    raise self.failure
-                for e in self.events[after:]:
-                    if e['type'] == kind and all(e.get(k) == v for k, v in fields.items()):
-                        return e
-                if self.closed and kind == 'ready':
-                    errors = [e for e in self.events if e['type'] == 'error']
-                    if errors and errors[-1].get('error') == 'audio_unavailable':
-                        assert self.start.get('audio_format') == 'opus', 'mandatory PCM16 unavailable'
-                        assert self.ws.close_code == 4503, 'audio_unavailable must close 4503'
-                        raise AudioUnavailable('4503 audio_unavailable: optional codec unavailable')
-                assert not self.closed, f'socket closed ({self.ws.close_code}) waiting for {kind}; errors: {[e.get("error") for e in self.events if e["type"] == "error"]}'
-                await self.changed.wait()
+        epoch, deadline = self.approval_epoch, time.monotonic() + timeout
+        while True:
+            self.changed.clear()
+            if self.failure:
+                raise self.failure
+            for e in self.events[after:]:
+                if e['type'] == kind and all(e.get(k) == v for k, v in fields.items()):
+                    return e
+            if self.closed and kind == 'ready':
+                errors = [e for e in self.events if e['type'] == 'error']
+                if errors and errors[-1].get('error') == 'audio_unavailable':
+                    assert self.start.get('audio_format') == 'opus', 'mandatory PCM16 unavailable'
+                    assert self.ws.close_code == 4503, 'audio_unavailable must close 4503'
+                    raise AudioUnavailable('4503 audio_unavailable: optional codec unavailable')
+            assert not self.closed, f'socket closed ({self.ws.close_code}) waiting for {kind}; errors: {[e.get("error") for e in self.events if e["type"] == "error"]}'
+            if self.approval_epoch != epoch:
+                # Approvals: after `approval_resolved` an absolute limit of ours
+                # starts again from zero.
+                epoch, deadline = self.approval_epoch, time.monotonic() + timeout
+            # Approvals: while one is pending we apply no turn limit of our own
+            # except inactivity, which `thinking` frames keep fresh; the server
+            # ends the wait, and its default `approvals.timeout` is 300 s.
+            limit = deadline
+            if self.pending_approvals:
+                limit = max(limit, self.last_frame + self.APPROVAL_INACTIVITY)
+            remaining = limit - time.monotonic()
+            if remaining <= 0:
+                waiting = ' with an approval pending' if self.pending_approvals else ''
+                raise TimeoutError(f'timed out after {timeout}s waiting for {kind}{waiting}')
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.changed.wait(), remaining)
 
     async def quiet_for(self, seconds, forbidden):
         offset = len(self.events)
@@ -380,7 +449,7 @@ class Client:
         try:
             await asyncio.sleep(max(0, t.speaker_until-time.monotonic()))
             if not self.closed:
-                action = t.done.get('next_action')
+                action = t.action
                 if action in ('standby', 'mute'):
                     self.activation = False
                     await self.stop_ambient()
@@ -396,15 +465,17 @@ class Client:
         if user:
             transcript = await self.wait('transcript', after=offset, role='user', timeout=60)
             fields['turn_id'] = transcript['turn_id']
-        done = await self.wait('turn_done', after=offset, timeout=160, **fields)
+        done = await self.wait('turn_done', after=offset, timeout=self.TURN_LIMIT, **fields)
         tid = done['turn_id']
         t = self.turns[tid]
         errors = [e for e in self.events[offset:] if e['type'] == 'error' and e.get('turn_id') == tid]
         assert not errors, 'live turn returned an error'
         if audio:
             assert len(t.pcm) > 0 and any(t.pcm), 'no audible reply PCM'
-        await asyncio.wait_for(t.drained.wait(), 160)
-        if done.get('next_action') in ('standby', 'mute'):
+        # All of the reply's audio has arrived, so the drain is bounded by what
+        # is left to play rather than by the turn limit.
+        await asyncio.wait_for(t.drained.wait(), max(0, t.speaker_until - time.monotonic()) + 30)
+        if t.action in ('standby', 'mute'):
             await self.stop_ambient()
         return done
 
