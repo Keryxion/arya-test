@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 import pytest
 import pytest_asyncio
-from arya_test.client import Client, AudioUnavailable
+from arya_test.client import Client, AudioUnavailable, MODEL
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus):
     revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1],
         capture_output=True, text=True, check=False).stdout.strip() or 'unknown'
     lines=[f"## {'❌' if exitstatus or reports['failed'] else '✅'} Arya live suite: {counts}",'',
-        f"Target `{os.environ.get('ARYA_URL','unset')}`, model `free`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`.",
+        f"Target `{os.environ.get('ARYA_URL','unset')}`, model `{MODEL or 'server default'}`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`.",
         f"Suite commit `{revision[:12]}`; pytest exit status `{int(exitstatus)}`."]
     if exitstatus and not reports['failed']:
         lines += ['', 'Run incomplete or unsuccessful; see the full log for collection errors, interruption, or no tests collected.']
