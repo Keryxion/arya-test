@@ -13,6 +13,7 @@ def test_report_lists_every_failure_and_provenance(tmp_path, monkeypatch):
     assert all(f'`test_{i}`' in report for i in range(5))
     assert '5×' in report and 'server-revis' in report
     assert 'Suite commit `' in report and 'pytest exit status `1`' in report
+    assert report.splitlines()[2].startswith('Run finished 20') and report.splitlines()[2].endswith(' UTC.')
 
 
 def test_collection_error_cannot_report_green(tmp_path, monkeypatch):

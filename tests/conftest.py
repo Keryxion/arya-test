@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import subprocess
+import time
 from pathlib import Path
 import pytest
 import pytest_asyncio
@@ -58,7 +59,9 @@ def pytest_terminal_summary(terminalreporter, exitstatus):
     reason=lambda r: (getattr(getattr(r.longrepr,'reprcrash',None),'message','') or str(r.longrepr)).strip().splitlines()[0][:200]
     revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1],
         capture_output=True, text=True, check=False).stdout.strip() or 'unknown'
+    # The report comment is edited in place, so GitHub's date on it is the first run's.
     lines=[f"## {'❌' if exitstatus or reports['failed'] else '✅'} Arya live suite: {counts}",'',
+        time.strftime('Run finished %Y-%m-%d %H:%M UTC.', time.gmtime()),'',
         f"Target `{os.environ.get('ARYA_URL','unset')}`, model `{MODEL or 'server default'}`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`.",
         f"Suite commit `{revision[:12]}`; pytest exit status `{int(exitstatus)}`."]
     if exitstatus and not reports['failed']:
