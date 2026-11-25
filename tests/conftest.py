@@ -1,10 +1,11 @@
 import os
 import json
 import hashlib
+import subprocess
 from pathlib import Path
 import pytest
 import pytest_asyncio
-from arya_test.client import Client, AudioUnavailable
+from arya_test.client import Client, AudioUnavailable, MODEL
 
 
 @pytest.fixture
@@ -47,15 +48,21 @@ def pytest_runtest_makereport(item, call):
     setattr(item, 'rep_' + call.when, outcome.get_result())
 
 
-def pytest_terminal_summary(terminalreporter):
+def pytest_terminal_summary(terminalreporter, exitstatus):
     """Write reports/summary.md: the report ci/run.sh prints and posts."""
     stats=terminalreporter.stats
     reports={k:[r for r in stats.get(k,[]) if getattr(r,'when','call') in ('call','setup')] for k in ('passed','failed','error','skipped','xfailed','xpassed')}
-    reports['failed']+=reports.pop('error')
+    reports['failed'] += list(stats.get('error', []))
+    reports.pop('error')
     counts=', '.join(f'{len(v)} {k}' for k,v in reports.items() if v) or 'no tests ran'
     reason=lambda r: (getattr(getattr(r.longrepr,'reprcrash',None),'message','') or str(r.longrepr)).strip().splitlines()[0][:200]
-    lines=[f"## {'❌' if reports['failed'] else '✅'} Arya live suite: {counts}",'',
-        f"Target `{os.environ.get('ARYA_URL','unset')}`, model `free`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`."]
+    revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, check=False).stdout.strip() or 'unknown'
+    lines=[f"## {'❌' if exitstatus or reports['failed'] else '✅'} Arya live suite: {counts}",'',
+        f"Target `{os.environ.get('ARYA_URL','unset')}`, model `{MODEL or 'server default'}`, server commit `{os.environ.get('CI_COMMIT_SHA','unknown')[:12]}`.",
+        f"Suite commit `{revision[:12]}`; pytest exit status `{int(exitstatus)}`."]
+    if exitstatus and not reports['failed']:
+        lines += ['', 'Run incomplete or unsuccessful; see the full log for collection errors, interruption, or no tests collected.']
     # One line per distinct reason: an unreachable server fails every test the same way.
     by_reason={}
     for r in reports['failed']:
@@ -63,7 +70,7 @@ def pytest_terminal_summary(terminalreporter):
     if by_reason:
         lines+=['','### Failed','']
     for why,ids in sorted(by_reason.items(),key=lambda x:-len(x[1])):
-        names=', '.join(f'`{i}`' for i in ids[:3])+(f' and {len(ids)-3} more' if len(ids)>3 else '')
+        names=', '.join(f'`{i}`' for i in ids)
         lines.append(f'- **{len(ids)}×** {why}: {names}' if len(ids)>1 else f'- {names}: {why}')
     if reports['xpassed']:
         lines+=['','### Passing despite an xfail mark (remove the mark)','']+[f'- `{r.nodeid}`' for r in reports['xpassed']]
