@@ -1,4 +1,4 @@
-"""Real microphone → STT → selected free model → TTS tests on the live server."""
+"""Real microphone → STT → the selected chat model → TTS tests on the live server."""
 import asyncio
 import pytest
 
@@ -28,11 +28,14 @@ async def test_real_voice_turn_commit_and_followup(client, fmt):
     c=await client(audio_format=fmt,transcripts=True)
     offset=await c.utterance('Arya, what is two plus two? Answer briefly. Do not use any tools.')
     done=await c.finish(offset,user=c.start.get("transcripts") is True)
-    assert 'next_action' not in done
+    # Section 4 makes next_action optional, and standby is correct when the
+    # person has said they are done. Only a failed or interrupted turn_done
+    # must carry none.
+    assert done.get('next_action') in (None,'standby'), done
     messages=[e for e in c.events[offset:] if e['type']=='transcript']
     assert any(e['role']=='user' and e['text'] for e in messages)
     assert any(e['role']=='assistant' and e.get('message_id') and e['text']=='' for e in messages)
-    assert any(word in assistant_text(c,offset).lower() for word in ('four','4')), 'free model reply did not answer input'
+    assert any(word in assistant_text(c,offset).lower() for word in ('four','4')), 'model reply did not answer input'
     offset=await c.utterance('What was the arithmetic question I just asked you? Answer briefly without tools.')
     other=await c.finish(offset,user=c.start.get("transcripts") is True)
     assert other['turn_id']!=done['turn_id']
@@ -74,7 +77,7 @@ async def test_model_change_during_turn_keeps_audio(client):
     c=await client()
     await c.send(type='say',text='This reply should finish even when the model selection changes during playback.')
     turn=await c.wait('speaking')
-    await c.select_free()
+    await c.select_model()
     done=await c.finish()
     assert done['turn_id']==turn['turn_id']
     assert not any(e['type']=='interrupted' for e in c.events)

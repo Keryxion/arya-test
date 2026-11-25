@@ -1,4 +1,6 @@
 """Local negative controls: prove the harness rejects corrupt wire behavior."""
+import asyncio
+import time
 import pytest
 from arya_test.client import Client
 from arya_test.audio import Opus
@@ -13,13 +15,27 @@ def test_validator_rejects_wrong_order_and_missing_ids():
         c._validate({'type':'speaking','turn_id':'b'},0)
 
 
-def test_validator_rejects_false_completion_and_liveness_after_done():
+def test_validator_rejects_liveness_after_done():
     c=Client('ws://invalid','unused')
-    with pytest.raises(AssertionError):
-        c._validate({'type':'turn_done','turn_id':'a','next_action':'invalid'},0)
     c._validate({'type':'turn_done','turn_id':'a','next_action':'listen'},0)
+    assert c.turns['a'].action=='listen'
     with pytest.raises(AssertionError,match='terminal'):
         c._validate({'type':'thinking','turn_id':'a','tool_calls':0,'reasoning_tokens':None},0)
+
+
+@pytest.mark.parametrize('value', ['invalid','Listen','',None,7])
+def test_unknown_next_action_is_treated_as_absent(value):
+    """Section 4: listen, standby and mute are the only values; any other is absent."""
+    c=Client('ws://invalid','unused')
+    emit(c,type='turn_done',turn_id='a',next_action=value)
+    assert c.turns['a'].action is None
+
+
+def test_an_interrupted_turn_may_carry_an_unknown_next_action():
+    c=Client('ws://invalid','unused')
+    emit(c,type='interrupted',turn_id='a')
+    emit(c,type='turn_done',turn_id='a',next_action='invalid')
+    assert c.turns['a'].action is None
 
 
 def test_validator_rejects_unsolicited_transcripts():
@@ -123,6 +139,36 @@ def test_reconnect_snapshot_and_carried_counters():
     emit(c,type='turn_done',turn_id='a')
 
 
+def test_resume_without_reply_text_is_inferred_from_state():
+    """Reconnecting during a turn: the running-text snapshot appears only when
+    the turn already has reply text, and the thinking counters carry on from
+    where they were rather than restarting at zero."""
+    c=Client('ws://invalid','unused',transcripts=True)
+    emit(c,type='transcript',turn_id='turn-41',role='user',text='hello',message_id='m-123',replay=True)
+    emit(c,type='state',turn_id='turn-41',state='thinking')
+    assert c.snapshot_turn is None and c.turns['turn-41'].resumed
+    emit(c,type='thinking',turn_id='turn-41',tool_calls=3,reasoning_tokens=2400)
+    emit(c,type='transcript',turn_id='turn-41',role='assistant',text='Two things tomorrow.')
+    emit(c,type='transcript',turn_id='turn-41',role='assistant',text='',message_id='m-124')
+    emit(c,type='turn_done',turn_id='turn-41')
+
+
+def test_a_turn_seen_from_its_start_must_reset_its_counters():
+    c=Client('ws://invalid','unused')
+    with pytest.raises(AssertionError,match='initial counters not reset'):
+        emit(c,type='thinking',turn_id='a',tool_calls=3,reasoning_tokens=None)
+
+
+def test_mid_turn_state_is_not_a_resume():
+    """An approval's state frames belong to a turn seen from its start, so they
+    are not the resume signal."""
+    c=Client('ws://invalid','unused')
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    for state in ('speaking','listening','thinking'):
+        emit(c,type='state',turn_id='a',state=state)
+    assert not c.turns['a'].resumed
+
+
 def test_cursorless_replay_only_for_running_assistant():
     c=Client('ws://invalid','unused',transcripts=True)
     with pytest.raises(AssertionError,match='user replay'):
@@ -160,7 +206,7 @@ def test_resumed_reply_needs_thinking_before_live_text():
         emit(c,type='transcript',turn_id='a',role='assistant',text='world')
 
 
-@pytest.mark.parametrize('action,activation,expected', [(None,True,True),(None,False,False),('standby',True,False),('listen',False,True)])
+@pytest.mark.parametrize('action,activation,expected', [(None,True,True),(None,False,False),('standby',True,False),('listen',False,True),('invalid',True,True),('invalid',False,False)])
 async def test_playback_drain_preserves_or_changes_activation(action,activation,expected):
     c=Client('ws://invalid','unused')
     sent=[]
@@ -191,6 +237,53 @@ def test_resumed_text_also_needs_a_closing_cursor():
     emit(c,type='thinking',turn_id='a',tool_calls=2,reasoning_tokens=None)
     with pytest.raises(AssertionError,match='closing transcript'):
         emit(c,type='turn_done',turn_id='a')
+
+
+async def test_pending_approval_suspends_the_absolute_turn_limit(monkeypatch):
+    """Section 4 Approvals: while one is pending the client applies no turn
+    limit of its own except inactivity, which thinking frames keep fresh; the
+    server ends the wait, up to its 300 s default."""
+    monkeypatch.setattr(Client,'APPROVAL_INACTIVITY',.3)
+    c=Client('ws://invalid','unused')
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    emit(c,type='approval_request',turn_id='a',approval_id='ap-1',summary='Okay?',command='nc',choices=['once','deny'])
+    async def waits():
+        for _ in range(6):  # thinking keeps the wait fresh well past the limit
+            await asyncio.sleep(.1)
+            c.last_frame=time.monotonic()
+            c.changed.set()
+        emit(c,type='approval_resolved',approval_id='ap-1',outcome='approved')
+        emit(c,type='turn_done',turn_id='a')
+        c.changed.set()
+    task=asyncio.create_task(waits())
+    started=time.monotonic()
+    assert (await c.wait('turn_done',timeout=.1))['turn_id']=='a'
+    assert time.monotonic()-started>.3, 'the wait ended at the absolute limit'
+    await task
+    assert not c.pending_approvals
+
+
+async def test_an_absolute_limit_applies_when_no_approval_is_pending():
+    c=Client('ws://invalid','unused')
+    with pytest.raises(TimeoutError,match='waiting for turn_done'):
+        await c.wait('turn_done',timeout=.05)
+
+
+async def test_a_silent_approval_wait_still_ends(monkeypatch):
+    monkeypatch.setattr(Client,'APPROVAL_INACTIVITY',.05)
+    c=Client('ws://invalid','unused')
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    emit(c,type='approval_request',turn_id='a',approval_id='ap-1',summary='Okay?',command='nc',choices=['once'])
+    with pytest.raises(TimeoutError,match='approval pending'):
+        await c.wait('turn_done',timeout=.05)
+
+
+def test_an_ending_clears_an_unresolved_approval():
+    c=Client('ws://invalid','unused')
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    emit(c,type='approval_request',turn_id='a',approval_id='ap-1',summary='Okay?',command='nc',choices=['once'])
+    emit(c,type='turn_done',turn_id='a')
+    assert not c.pending_approvals
 
 
 @pytest.mark.parametrize('code,error,fmt,expected', [

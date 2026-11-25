@@ -121,8 +121,8 @@ async def test_model_catalog(client):
     cat = c.ready['model_catalog']
     assert set(cat) <= {'model','provider','providers'}
     assert isinstance(cat['providers'], list)
-    # Penny must advertise a configured provider for the requested free model.
-    assert any('free' in p['models'] for p in cat['providers']), 'free not advertised by live server'
+    # Section 11 names no model, so the catalog's shape is the whole contract:
+    # which models a server runs is its own configuration.
     for p in cat['providers']:
         assert set(p) == {'slug','name','models'}
         assert all(isinstance(m, str) and m for m in p['models'])
@@ -135,7 +135,7 @@ async def test_model_command_reset(client):
     for field in ('model', 'provider'):
         assert result['current_model'][field] == c.ready['current_model'][field]
     assert result['current_model'] == await c.current_model()
-    await c.select_free()
+    await c.select_model()
 
 
 @pytest.mark.parametrize('name', ['model', 'reasoning'])
@@ -152,7 +152,7 @@ async def test_bad_wake_keeps_socket(client, frame):
     c = await client()
     await c.send(type='wake', **frame)
     await c.wait('error',error='bad_wake')
-    await c.select_free()
+    await c.select_model()
 
 
 async def test_wake_correlated_within_one_second(client):
@@ -190,7 +190,7 @@ async def test_bad_command(client, frame):
     await c.send(type='command',**frame)
     e = await c.wait('command', name=frame['name'])
     assert e.get('error')=='bad_command' and 'reply' not in e
-    await c.select_free()
+    await c.select_model()
 
 
 async def test_unknown_command(client):
@@ -240,7 +240,7 @@ async def test_title_command_keeps_socket(client):
     await c.send(type='command',name='title',args=[c.start['device_name']])
     e=await c.wait('command',name='title')
     assert isinstance(e.get('reply'),str) and 'error' not in e
-    await c.select_free()
+    await c.select_model()
 
 
 async def test_transcripts_boolean_opt_in(client):
@@ -363,7 +363,7 @@ async def test_malformed_and_unknown_controls_ignored(client):
                   dict(type='client_diagnostics',request_id='unrequested')]:
         await c.send(frame)
     await c.quiet_for(.2,{'error','thinking','turn_done'})
-    await c.select_free()
+    await c.select_model()
 
 
 async def test_cancel_without_turn_sends_no_terminal_frames(client):
