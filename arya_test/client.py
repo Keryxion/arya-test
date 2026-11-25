@@ -37,6 +37,7 @@ class Turn:
     tool_calls: int = 0
     reasoning: int | None = None
     first_audio: float | None = None
+    audio_before_text: bool = False
     speaker_until: float = 0
     decoder: Opus | None = None
     drained: asyncio.Event = field(default_factory=asyncio.Event)
@@ -221,7 +222,10 @@ class Client:
         if self.start.get('transcripts') is True and self.active_audio not in self.transient_turns:
             events = [e for e in self.events if e.get('turn_id') == self.active_audio]
             approval_question = any(e['type']=='approval_request' for e in events)
-            assert approval_question or any(e['type']=='transcript' and e.get('role')=='assistant' and e.get('text') and not e.get('replay') for e in events), 'reply audio before live transcript text'
+            # A confirm or error tone is reply audio with no text of its own,
+            # so audio alone is allowed; text arriving after it is not.
+            if not approval_question and not any(e['type']=='transcript' and e.get('role')=='assistant' and e.get('text') and not e.get('replay') for e in events):
+                t.audio_before_text = True
         pcm = t.decoder.decode(packet) if t.decoder else packet
         assert pcm and len(pcm) % 2 == 0, 'invalid PCM16 reply'
         t.pcm.extend(pcm)
@@ -316,6 +320,7 @@ class Client:
                     assert e['text'] == '' and not t.interrupted, 'invalid assistant closing transcript'
                 else:
                     assert e['text'], 'empty transcript without cursor'
+                    assert not t.audio_before_text, 'reply audio before live transcript text'
             elif kind == 'interrupted':
                 t.interrupted, t.speaker_until = True, now
                 self.pending_interruption = tid
@@ -360,8 +365,6 @@ class Client:
             assert type(e.get('muted', False)) is bool, 'controls.muted is not a Boolean'
             volume = e.get('volume', 0)
             assert type(volume) in (int, float) and 0 <= volume <= 1, 'controls.volume is not a number from 0 to 1'
-        if kind == 'tone':
-            assert e.get('tone') in ('confirm', 'error', 'approval') and 'turn_id' not in e
         if kind == 'approval_request':
             assert e.get('approval_id') and e.get('turn_id')
             assert isinstance(e.get('summary'), str) and isinstance(e.get('command'), str)

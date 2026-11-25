@@ -85,8 +85,9 @@ Standalone manual runs test whatever revision Penny is serving.
 | §12 mute and volume | A device's `controls` reports as the admin socket's `muted`/`volume`, a report with no `volume`, both `null` once it detaches; the server's `controls` frame carries only the fields a `set` gave, one frame per `set` |
 | `specs/admin.md` | Missing/wrong key refused with 401 before the upgrade, `devices` first, entry fields and types, `device` on first connection/report/detach, `set` answered with the device's own report (applied, changed by the device, unanswered after 2 s), `not_attached`, `unknown_device`, `bad_request`, no answer without a string `request_id`, `announce` to one name in an array or alone, unknown name in `skipped`, no `target` when only test devices are attached |
 
-Frame validation also checks approval requests/resolutions and tones whenever
-emitted. The suite does **not yet force** approval expiry/reconnect, provider
+Frame validation also checks approval requests/resolutions whenever emitted. A
+confirm, error or approval tone is reply audio and is not told apart from
+speech. The suite does **not yet force** approval expiry/reconnect, provider
 failure/stall, deletion of a conversation from Hermes, scheduled outbound work,
 countdown snooze/multiple ringing. Ranked wake tie-breaks are checked when
 Penny enables selection; disabled selection is checked for grants instead. These
