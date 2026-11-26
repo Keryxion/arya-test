@@ -236,3 +236,18 @@ Next priorities:
    lack enough evidence to assign the latter to STT/provider/server.
 4. Review timeout diagnostic PR and existing pagination #17; neither merge nor
    deployment authorized/performed. Retest replay mismatch with #218 context.
+
+Independent audit reviewed:
+- Worker verified actual Penny checkout path
+  `/home/hermes/.hermes/plugins/hermes-converse` at `8caf88899e47`, matching Crow.
+- Main requires and attempts 4410; no reviewed PR owns a dedicated abnormal-close
+  fix. #219 concerns paced audio fencing, not new/reset close handshakes.
+- #178 (`b2c51329`) is draft and mergeable, owning fuller echo rejection;
+  #234 (`f9a32b12`) is clean and provides only the 1.5-second warm-up mitigation.
+- #218 (`f5777acb`) conflicts and owns related display-text normalization work.
+  It is not a proven fix for the observed capitalization/punctuation mismatch.
+  Spec supports consistent reply content but does not explicitly demand bytewise
+  assistant identity; preserve failure pending deterministic regression and spec
+  interpretation, rather than prematurely declaring product or harness defect.
+- Opened [suite PR #19](https://github.com/Keryxion/arya-test/pull/19).
+  Coordination used the [Paseo skill](/Users/dturner/.agents/skills/paseo/SKILL.md).
