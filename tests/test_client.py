@@ -255,10 +255,18 @@ async def test_playback_drain_preserves_or_changes_activation(action,activation,
 def test_reply_text_precedes_first_audio():
     c=Client('ws://invalid','unused',transcripts=True)
     emit(c,type='speaking',turn_id='a')
-    with pytest.raises(AssertionError,match='before live transcript'):
-        c._audio(b'\1\0',1)
-    emit(c,type='transcript',role='assistant',turn_id='a',text='Hello')
     c._audio(b'\1\0',1)
+    with pytest.raises(AssertionError,match='before live transcript'):
+        emit(c,type='transcript',role='assistant',turn_id='a',text='Hello')
+
+
+def test_a_tone_is_reply_audio_with_no_text():
+    """Section 4: a reply that is only a confirm or error tone has audio and no
+    `transcript` frame."""
+    c=Client('ws://invalid','unused',transcripts=True)
+    emit(c,type='speaking',turn_id='a')
+    c._audio(b'\1\0',1)
+    emit(c,type='turn_done',turn_id='a')
 
 
 def test_resumed_text_also_needs_a_closing_cursor():
