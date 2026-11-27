@@ -30,3 +30,15 @@ def test_teardown_failure_is_visible(tmp_path, monkeypatch):
     pytest_terminal_summary(SimpleNamespace(stats={'error': [error]}), 1)
     report = (tmp_path / 'reports/summary.md').read_text()
     assert '`test_cleanup`' in report and 'cleanup failed' in report
+
+
+def test_skipped_coverage_is_visible_without_failing_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    skip = SimpleNamespace(when='setup', nodeid='test_download[micro]',
+        longrepr=('tests/test_wake.py', 15, 'Skipped: bundled model; download coverage not exercised'))
+    pytest_terminal_summary(SimpleNamespace(stats={'skipped': [skip]}), 0)
+    report = (tmp_path / 'reports/summary.md').read_text()
+    assert '✅' in report and '1 skipped' in report
+    assert 'Coverage not exercised' in report
+    assert '`test_download[micro]`: bundled model; download coverage not exercised' in report
+    assert 'tests/test_wake.py' not in report

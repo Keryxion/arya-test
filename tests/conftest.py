@@ -77,6 +77,12 @@ def pytest_terminal_summary(terminalreporter, exitstatus):
         lines.append(f'- **{len(ids)}×** {why}: {names}' if len(ids)>1 else f'- {names}: {why}')
     if reports['xpassed']:
         lines+=['','### Passing despite an xfail mark (remove the mark)','']+[f'- `{r.nodeid}`' for r in reports['xpassed']]
+    if reports['skipped']:
+        lines += ['', '### Coverage not exercised', '']
+        for r in reports['skipped']:
+            # Pytest skip longrepr is (path, line, reason), not a crash repr.
+            detail = r.longrepr[2] if isinstance(r.longrepr, tuple) and len(r.longrepr) == 3 else reason(r)
+            lines.append(f'- `{r.nodeid}`: {str(detail).removeprefix("Skipped: ")[:200]}')
     if os.environ.get('CI_PIPELINE_URL'):
         lines+=['',f"[Full log]({os.environ['CI_PIPELINE_URL']})"]
     Path('reports').mkdir(exist_ok=True)
