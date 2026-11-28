@@ -247,14 +247,17 @@ async def test_transcripts_boolean_opt_in(client):
     assert c.ready['transcripts'] is False
 
 
-@pytest.mark.parametrize('rank', ['confidence','volume','heard_at','arrival'])
+@pytest.mark.parametrize('rank', ['confidence','volume','volume_over_confidence','heard_at','arrival'])
 async def test_wake_ranking_when_enabled_and_grants_when_disabled(client, rank):
     a,b=await client(),await client()
-    # Arrival is also the final tie-break; all other tiers can select the later claimant.
+    # Equal composite scores use detection time and arrival; a louder claimant can beat higher confidence.
     sa=dict(confidence=.5,volume=.2,heard_at=1000)
     sb=dict(sa)
     if rank=='confidence': sb['confidence']=.9
     if rank=='volume': sb['volume']=.8
+    if rank=='volume_over_confidence':
+        sa.update(confidence=.99,volume=.05)
+        sb.update(confidence=.8,volume=.2)
     if rank=='heard_at': sb['heard_at']=500
     await a.send(type='wake',claim_id='rank-a',wake_word='Hey Arya',**sa)
     await b.send(type='wake',claim_id='rank-b',wake_word='Hey Arya',**sb)
