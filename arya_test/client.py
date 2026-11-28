@@ -501,7 +501,14 @@ class Client:
             remaining = limit - time.monotonic()
             if remaining <= 0:
                 waiting = ' with an approval pending' if self.pending_approvals else ''
-                raise TimeoutError(f'timed out after {timeout}s waiting for {kind}{waiting}')
+                # Only protocol enums/booleans: never print requested text, IDs,
+                # or arbitrary frame contents in a public CI failure summary.
+                filters = {k: v for k, v in fields.items()
+                           if (k == 'role' and v in ('user', 'assistant'))
+                           or (k == 'state' and v in ('thinking', 'speaking', 'listening'))
+                           or (k == 'replay' and isinstance(v, bool))}
+                context = f' matching {filters}' if filters else ''
+                raise TimeoutError(f'timed out after {timeout}s waiting for {kind}{context}{waiting}')
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.changed.wait(), remaining)
 

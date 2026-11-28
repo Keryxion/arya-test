@@ -310,6 +310,24 @@ async def test_an_absolute_limit_applies_when_no_approval_is_pending():
         await c.wait('turn_done',timeout=.05)
 
 
+async def test_timeout_distinguishes_user_transcript_without_exposing_contents():
+    c=Client('ws://invalid','unused')
+    with pytest.raises(TimeoutError) as exc:
+        await c.wait('transcript', role='user', replay=False,
+                     text='private utterance', message_id='private cursor', timeout=.01)
+    message = str(exc.value)
+    assert "'role': 'user'" in message
+    assert "'replay': False" in message
+    assert 'private' not in message
+
+
+async def test_timeout_omits_unrecognized_filter_values():
+    c=Client('ws://invalid','unused')
+    with pytest.raises(TimeoutError) as exc:
+        await c.wait('transcript', role='private role', replay='private value', timeout=.01)
+    assert 'private' not in str(exc.value)
+
+
 async def test_a_silent_approval_wait_still_ends(monkeypatch):
     monkeypatch.setattr(Client,'APPROVAL_INACTIVITY',.05)
     c=Client('ws://invalid','unused')
