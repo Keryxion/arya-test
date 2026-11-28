@@ -88,8 +88,10 @@ async def admin(live_config):
 
 
 async def device(client, admin, **start):
-    """Attach a test device and wait until the admin connection has been told."""
-    c = await client(select=False, **start)
+    """Attach a test device and wait until the admin connection has been told.
+
+    The device does not report `controls` by itself: these tests send each report by hand."""
+    c = await client(select=False, auto_controls=False, **start)
     name = c.ready['device_name']
     first = await admin.wait('device', device_name=name)
     assert first['attached'] and first['muted'] is None and first['volume'] is None  # it has not said
@@ -148,6 +150,24 @@ async def test_set_sends_one_controls_frame_and_answers_with_the_report(client, 
     assert sum(e['type'] == 'controls' for e in c.events) == 3, 'more than one controls frame for a set'
 
 
+async def test_a_device_reports_mute_after_ready_and_applies_a_set(client, admin):
+    """Section 12 from the device's side: report after `ready`, apply, answer, and land in standby."""
+    c = await client(select=False)
+    name = c.ready['device_name']
+    reported = await admin.wait('device', device_name=name, muted=False)
+    assert reported['volume'] is None, 'the jig has no volume to report'
+    # A device mutes as its own control does; it reports once, then stays muted.
+    offset = len(c.events)
+    result = await admin.request(type='set', device_name=name, muted=True, volume=0.5)
+    got = entry(result['device'])
+    assert (got['muted'], got['volume']) == (True, None)
+    assert c.events[offset]['type'] == 'controls' and c.muted and not c.activation
+    result = await admin.request(type='set', device_name=name, muted=False)
+    assert entry(result['device'])['muted'] is False and not c.muted
+    # A value that is not a Boolean or not a number from 0 to 1 never gets this far: the server refuses it.
+    await c.quiet_for(.3, {'speaking', 'thinking', 'turn_done'})
+
+
 async def test_set_not_attached_and_unknown_device(client, admin):
     c, name = await device(client, admin)
     await c.ws.close()
@@ -161,6 +181,7 @@ async def test_bad_requests(client, admin):
     # An attached device, so that `bad_request` is the only answer the spec allows.
     c, name = await device(client, admin)
     await admin.ws.send_str('not json')
+    offset = len(c.events)
     await admin.ws.send_json({'type': 'set', 'device_name': name, 'muted': True})  # no request_id: ignored
     await admin.ws.send_json({'type': 'set', 'device_name': name, 'muted': True, 'request_id': 7})
     sent = []
@@ -174,7 +195,10 @@ async def test_bad_requests(client, admin):
         assert result == {'type': 'result', 'request_id': result['request_id'], 'error': 'bad_request'}, frame
         sent.append(result['request_id'])
     assert [f['request_id'] for f in admin.frames if f['type'] == 'result'] == sent, 'a frame with no request_id was answered'
-    await c.quiet_for(.2, {'controls', 'speaking', 'thinking', 'turn_done'})
+    await asyncio.sleep(.5)
+    # A server that ran either `set` would have sent the device a `controls` frame at once.
+    assert not any(e['type'] in ('controls', 'speaking', 'thinking', 'turn_done') for e in c.events[offset:]), \
+        'a set with no string request_id reached the device'
 
 
 def announcement(c, done):

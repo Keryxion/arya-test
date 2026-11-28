@@ -135,6 +135,19 @@ async def test_barge_in_captures_continuation(client):
     assert any(word in assistant_text(c,second_offset).lower() for word in ('six','6'))
 
 
+async def test_heard_is_recorded_and_the_turn_carries_on(client):
+    """Section 4: `heard` is neither `cancel` nor barge-in, and no frame answers it."""
+    c=await client(transcripts=True)
+    offset=await c.utterance('Arya, count from one to thirty, without tools.')
+    await c.wait('speaking',after=offset,timeout=120)
+    heard=len(c.events)
+    await c.send(type='heard',wake_word='Hey Arya')
+    await c.send(type='heard',wake_word='cancel')
+    await c.quiet_for(1.5,{'interrupted','error'})
+    assert not any(e['type'] in ('interrupted','error') for e in c.events[heard:])
+    await c.finish(offset,user=True)
+
+
 async def test_countdown_create_replay_and_cancel(client):
     c=await client(transcripts=True)
     try:
@@ -148,11 +161,11 @@ async def test_countdown_create_replay_and_cancel(client):
         offset=await c.utterance('Arya, cancel my contract check countdown timer. Use the countdown tool.')
         await c.finish(offset,user=c.start.get("transcripts") is True)
         await c.wait('countdown_cancel',after=offset,countdown_id=alarm['countdown_id'],timeout=10)
+        # A countdown that ends is reported once with `ended`; the client does that on a cancel.
+        await c.quiet_for(.3,set())
+        assert alarm['countdown_id'] not in c.countdowns
     finally:
-        # Test-owned countdown only; ended removes it even if the model did not cancel.
-        for e in c.events:
-            if e['type']=='countdown' and not c.closed:
-                await c.send(type='countdown',countdown_id=e['countdown_id'],ended=True)
+        await c.close()
 
 
 async def test_disconnect_does_not_cancel_active_turn(client):
@@ -211,9 +224,7 @@ async def test_countdown_extension_preserves_id(client):
         extended=await c.wait('countdown',after=offset,countdown_id=alarm['countdown_id'],timeout=10)
         assert extended['deadline_unix_ms']>alarm['deadline_unix_ms']
     finally:
-        for e in c.events:
-            if e['type']=='countdown' and not c.closed:
-                await c.send(type='countdown',countdown_id=e['countdown_id'],ended=True)
+        await c.close()  # it is still counting: a device sends no `ended` for that
 
 
 async def test_cancel_capture_before_submission_has_no_transcript(client):
