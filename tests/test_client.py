@@ -17,6 +17,7 @@ def test_validator_rejects_wrong_order_and_missing_ids():
 
 def test_validator_rejects_liveness_after_done():
     c=Client('ws://invalid','unused')
+    c._validate({'type':'thinking','turn_id':'a','tool_calls':0,'reasoning_tokens':None},0)
     c._validate({'type':'turn_done','turn_id':'a','next_action':'listen'},0)
     assert c.turns['a'].action=='listen'
     with pytest.raises(AssertionError,match='terminal'):
@@ -246,6 +247,7 @@ async def test_playback_drain_preserves_or_changes_activation(action,activation,
     c.activation=activation
     frame=dict(type='turn_done',turn_id='a')
     if action: frame['next_action']=action
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
     emit(c,**frame)
     await c._drain('a')
     assert c.activation is expected
@@ -366,7 +368,7 @@ async def test_commit_is_a_typed_endpointing_frame(monkeypatch):
     await c.utterance('hello')
     c.closed=True
     await c.stop_ambient()
-    assert c.ws.frames==[{'type':'endpointing','commit':True}]
+    assert c.ws.frames==[{'type':'state','state':'listening'},{'type':'endpointing','commit':True}]
 
 
 async def test_close_sends_no_frame():
@@ -377,7 +379,7 @@ async def test_close_sends_no_frame():
 
 
 @pytest.mark.parametrize('broken', [
-    {'reasoning_support': 'supported'}, {'reasoning_level': False},
+    {'reasoning_level': False},
     {'pending': 1}, {'reasoning_levels': 'low'}, {'reasoning_support': 'maybe'},
 ])
 def test_reasoning_validator_rejects_malformed_state(broken):
@@ -399,16 +401,174 @@ def test_unknown_reasoning_may_list_unconfirmed_levels():
     ([dict(slug='p',name='P',models=['other'])], True, None),         # not offered: never asked
     ([dict(slug='p',name='P',models=['free'])], False, 'selected'),
     ([dict(slug='p',name='P',models=['free'])], True, 'fail'),        # offered, then refused
+    ([dict(slug='p',name='P',models=['free'])], 'reply', None),       # refused in reply text (section 11)
 ])
 def test_select_model_only_tolerates_a_model_nobody_offered(providers, refused, outcome):
     c=Client('ws://invalid','unused')
     c.ready=dict(model_catalog=dict(providers=providers))
     state=dict(model='default' if refused else 'free',provider='p',pending=False)
     async def command(name, args):
-        return dict(current_model=state, **({'error':'refused'} if refused else {}))
+        return dict(current_model=state, **({'error':'refused'} if refused is True else {'reply':'No such model.'} if refused else {}))
     c.setting_command=command
     if outcome=='fail':
         with pytest.raises(AssertionError):
             asyncio.run(c.select_model('free'))
     else:
         assert asyncio.run(c.select_model('free')) == (state if outcome else None)
+
+
+class Wire:
+    """A client with its socket replaced by a list of what it sent."""
+    def __new__(cls, **kw):
+        c=Client('ws://invalid','unused',**kw)
+        c.sent=[]
+        async def send(data=None, **frame): c.sent.append(data if data is not None else frame)
+        c.send=send
+        return c
+
+
+async def act(c, **frame):
+    c._validate(frame, 0)
+    c.events.append(frame)
+    await c._act(frame)
+
+
+async def test_a_server_controls_mute_is_applied_and_answered():
+    c=Wire()
+    c.activation=True
+    await act(c,type='controls',muted=True)
+    assert c.muted and not c.activation
+    assert c.sent==[{'type':'endpointing','commit':True},{'type':'state','state':'standby'},{'type':'controls','muted':True}]
+    c.sent.clear()
+    await act(c,type='controls',muted=False)   # unmuting lands in standby
+    assert not c.muted and not c.activation
+    assert c.sent==[{'type':'state','state':'standby'},{'type':'controls','muted':False}]
+
+
+async def test_a_controls_frame_is_answered_even_when_nothing_changes_and_volume_is_ignored():
+    c=Wire()
+    await act(c,type='controls',volume=0.7)
+    await act(c,type='controls',muted=False)
+    assert c.sent==[{'type':'controls','muted':False}]*2
+
+
+async def test_an_idle_mute_commits_nothing():
+    c=Wire()
+    await act(c,type='controls',muted=True)
+    assert not any(f['type']=='endpointing' for f in c.sent)
+
+
+async def test_mute_next_action_is_applied_on_receipt_and_reported():
+    c=Wire()
+    c.activation=True
+    await act(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    await act(c,type='turn_done',turn_id='a',next_action='mute')
+    assert c.muted and c.sent[-1]=={'type':'controls','muted':True}
+    assert {'type':'endpointing','commit':True} in c.sent
+    await asyncio.gather(*c.tasks)
+
+
+async def test_client_diagnostics_is_answered_with_the_request_id():
+    c=Wire()
+    await act(c,type='client_diagnostics',request_id='diag-1')
+    (answer,)=c.sent
+    assert answer['type']=='client_diagnostics' and answer['request_id']=='diag-1'
+    assert answer['version'] and answer['build'] and isinstance(answer['diagnostics'],dict)
+    assert 'error' not in answer and len(str(answer).encode())<32*1024
+    with pytest.raises(AssertionError,match='request_id'):
+        await act(c,type='client_diagnostics')
+
+
+async def test_quiet_returns_to_standby_at_the_threshold_only_while_listening():
+    c=Wire()
+    c.activation=True
+    await act(c,type='quiet',quiet_seconds=4.0)
+    assert c.activation and not c.sent
+    await act(c,type='quiet',quiet_seconds=5.0)
+    assert not c.activation and c.sent==[{'type':'state','state':'standby'}]
+    c.sent.clear()
+    await act(c,type='quiet',quiet_seconds=6.0)
+    assert not c.sent
+
+
+def test_the_default_start_asks_for_quiet_frames():
+    assert Client('ws://invalid','unused').start['quiet_interval']==1
+
+
+async def test_next_action_of_a_turn_never_seen_to_start_is_ignored():
+    c=Wire()
+    c.activation=True
+    await act(c,type='turn_done',turn_id='ghost',next_action='standby')
+    assert c.turns['ghost'].action is None
+    await c._drain('ghost')
+    assert c.activation, 'a standby for a turn the device never saw start changed the activation'
+
+
+async def test_a_second_turn_done_replaces_the_pending_ending():
+    c=Wire()
+    c.activation=True
+    await act(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    await act(c,type='speaking',turn_id='a')
+    c.turns['a'].speaker_until=time.monotonic()+.3   # still playing
+    await act(c,type='turn_done',turn_id='a',next_action='standby')
+    await act(c,type='interrupted',turn_id='a')
+    await act(c,type='turn_done',turn_id='a')
+    await asyncio.gather(*c.tasks,return_exceptions=True)
+    assert c.activation, 'the dropped standby was applied'
+    states=[f for f in c.sent if f['type']=='state' and f.get('turn_id')=='a' and f['state']!='speaking']
+    assert states==[{'type':'state','turn_id':'a','state':'listening'}]
+
+
+async def test_an_ending_already_applied_ignores_later_frames_of_the_turn():
+    c=Wire()
+    await act(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    await act(c,type='turn_done',turn_id='a')
+    await asyncio.gather(*c.tasks)
+    sent=len(c.sent)
+    await act(c,type='interrupted',turn_id='a')
+    await act(c,type='turn_done',turn_id='a')
+    assert len(c.sent)==sent and len(c.tasks)==1
+
+
+@pytest.mark.parametrize('own,expected',[(False,True),(True,False)])
+async def test_an_interruption_by_the_persons_speech_listens_but_our_own_cancel_does_not(own,expected):
+    c=Wire()
+    await act(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    if own:
+        c.turns['a'].ours=True
+    await act(c,type='interrupted',turn_id='a')
+    await act(c,type='turn_done',turn_id='a')
+    await asyncio.gather(*c.tasks)
+    assert c.activation is expected
+
+
+async def test_sending_cancel_or_new_marks_the_interruption_as_ours():
+    c=Client('ws://invalid','unused')
+    class Socket:
+        async def send_json(self, frame): pass
+    c.ws=Socket()
+    emit(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    emit(c,type='thinking',turn_id='b',tool_calls=0,reasoning_tokens=None)
+    await c.send(type='cancel',turn_id='b')
+    assert c.turns['b'].ours and not c.turns['a'].ours
+    await c.send(type='command',name='new')
+    assert c.turns['a'].ours
+
+
+async def test_a_server_state_applies_after_playback_drains_and_not_for_a_finished_turn():
+    c=Wire()
+    await act(c,type='thinking',turn_id='a',tool_calls=0,reasoning_tokens=None)
+    c.turns['a'].speaker_until=time.monotonic()+.2
+    await act(c,type='state',turn_id='a',state='listening')
+    assert not c.sent
+    await asyncio.sleep(.35)
+    assert c.sent==[{'type':'state','turn_id':'a','state':'listening'}]
+
+
+async def test_cancelling_a_countdown_it_holds_ends_it():
+    c=Wire()
+    await act(c,type='countdown',countdown_id='c1',deadline_unix_ms=1,ring_seconds=900,sound='alarm-1')
+    await act(c,type='countdown_cancel',countdown_id='unknown')
+    assert not c.sent
+    await act(c,type='countdown_cancel',countdown_id='c1')
+    assert c.sent==[{'type':'countdown','countdown_id':'c1','ended':True}]

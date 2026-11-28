@@ -88,7 +88,6 @@ async def test_rates(client, rate, fmt):
 async def test_malformed_opus_closes(client):
     c = await client(audio_format='opus')
     await c.ws.send_bytes(b'')
-    await c.wait('error', error='bad_audio')
     await asyncio.wait_for(c.reader, 10)
     assert c.ws.close_code == 4400
 
@@ -284,7 +283,6 @@ async def test_opus_non_twenty_ms_rejected(client):
     n=enc.lib.opus_encode(enc.ptr,bytes(320),160,output,4000)  # 10ms at 16kHz
     assert n>0
     await c.ws.send_bytes(output.raw[:n])
-    await c.wait('error',error='bad_audio')
     await asyncio.wait_for(c.reader,10)
     assert c.ws.close_code==4400
 

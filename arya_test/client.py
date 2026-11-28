@@ -1,6 +1,7 @@
 """Async headless Arya: reads continuously, models speaker drain, validates frames."""
 import asyncio
 import contextlib
+import importlib.metadata
 import json
 import os
 import time
@@ -18,6 +19,16 @@ from .wake import validate_wake_word
 # offer it keeps its own default instead of failing the run.
 MODEL = os.environ.get('ARYA_MODEL', 'free')
 
+# Section 5: a wake-word device returns to standby when `quiet_seconds` reaches 5.
+QUIET_THRESHOLD = 5
+
+
+def _version():
+    try:
+        return importlib.metadata.version('arya-test')
+    except importlib.metadata.PackageNotFoundError:
+        return 'unknown'
+
 
 class AudioUnavailable(Exception):
     """The server explicitly declined optional audio with the documented 4503."""
@@ -34,6 +45,10 @@ class Turn:
     resumed: bool = False
     saw_thinking: bool = False
     resume_state: bool = False
+    started: bool = False       # a frame of this turn other than turn_done has been seen
+    ours: bool = False          # this device sent the cancel, or the new-session command, that cut it
+    applied: bool = False       # its ending has been applied; later frames are ignored
+    drain: asyncio.Task | None = None
     tool_calls: int = 0
     reasoning: int | None = None
     first_audio: float | None = None
@@ -51,10 +66,13 @@ class Client:
     # replaces TURN_LIMIT during an approval wait.
     APPROVAL_INACTIVITY = 30
 
-    def __init__(self, url, key, device=None, resume=None, **start):
+    def __init__(self, url, key, device=None, resume=None, auto_controls=True, **start):
         self.url, self.key = url, key
+        # Section 2: wake-word devices send `quiet_interval: 1`.
         self.start = dict(type='start', assistant_name='Arya', device_name=device or f'arya-test-{uuid.uuid4().hex}',
-                          input_rate=16000, output_rate=24000)
+                          input_rate=16000, output_rate=24000, quiet_interval=1)
+        self.auto_controls = auto_controls
+        self.countdowns = {}
         self.start.update(start)
         self.events, self.turns = [], {}
         self.pending_interruption = None
@@ -89,6 +107,8 @@ class Client:
             self._validate_ready()
             if self.start.get('audio_format') == 'opus':
                 self.encoder = Opus(self.ready['input']['sample_rate'], encode=True)
+            if self.auto_controls:
+                await self.send_controls()  # section 12: report after every `ready`
             if select:
                 await self.select_model()
             return self
@@ -105,8 +125,7 @@ class Client:
         assert state.get('reasoning_support') in ('supported', 'unknown', 'unsupported')
         levels = state.get('reasoning_levels')
         assert isinstance(levels, list) and all(isinstance(v, str) and v for v in levels)
-        # unknown may list the levels the gateway accepts; only supported must confirm some.
-        assert levels or state['reasoning_support'] != 'supported', 'supported reasoning without levels'
+        # The spec lets a route list no levels whatever its support; it fixes none to list.
 
     def _validate_ready(self):
         r = self.ready
@@ -171,7 +190,9 @@ class Client:
         if 'error' in result and provider is None:
             return None  # nothing advertised it and the server refused; its default stands
         assert 'error' not in result, result  # the catalog offered it, so refusing is a failure
-        assert state['model'] == model and not state['pending'], result
+        if state['model'] != model:
+            return None  # section 11: a refusal can arrive as reply text; the default stands
+        assert not state['pending'], result
         assert provider is None or state['provider'] == provider, state
         return state
 
@@ -181,6 +202,11 @@ class Client:
 
     async def send(self, data=None, **kwargs):
         frame = data if data is not None else kwargs
+        if frame.get('type') == 'cancel' or (frame.get('type') == 'command' and frame.get('name') in ('new', 'reset')):
+            # An interruption this device caused is not the person speaking ("Handling `turn_done.next_action`").
+            tid = frame.get('turn_id')
+            for t in ([self.turns[tid]] if tid in self.turns else [] if tid else self.turns.values()):
+                t.ours = t.ours or not t.done
         if frame.get('type') == 'say' and isinstance(frame.get('text'), str) and frame['text'].strip():
             self.transient_turns.add(None)  # bind to the next thinking frame
         await self.ws.send_json(frame)
@@ -199,13 +225,7 @@ class Client:
                     self._validate(e, now)
                     self.offending_frame = None
                     self.events.append(e)
-                    if e['type'] == 'speaking':
-                        await self.send(type='state', turn_id=e['turn_id'], state='speaking')
-                    if e['type'] == 'turn_done' and self.turns[e['turn_id']].action == 'mute':
-                        self.muted, self.activation = True, False
-                        await self.stop_ambient()
-                    if e['type'] == 'turn_done':
-                        self.tasks.append(asyncio.create_task(self._drain(e['turn_id'])))
+                    await self._act(e)
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     raise AssertionError('WebSocket transport failure')
                 self.changed.set()
@@ -214,6 +234,68 @@ class Client:
         finally:
             self.closed = True
             self.changed.set()
+
+    async def _act(self, e):
+        """What a conforming device does on receiving a validated server frame."""
+        kind = e['type']
+        if kind == 'speaking':
+            await self.send(type='state', turn_id=e['turn_id'], state='speaking')
+        elif kind == 'state' and e['state'] in ('thinking', 'listening'):
+            # A state that arrives while reply audio plays takes effect once it has drained.
+            self.tasks.append(asyncio.create_task(self._show(e['turn_id'], e['state'])))
+        elif kind == 'turn_done':
+            t = self.turns[e['turn_id']]
+            if t.applied:
+                return  # an ending already applied: ignore later frames of the turn
+            if t.action == 'mute':
+                await self.set_muted(True)  # `mute` applies on receipt, and is reported like any change
+                await self.send_controls()
+            if t.drain:  # a second turn_done replaces the first: its pending action is dropped
+                t.drain.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t.drain
+                t.drained.clear()
+            t.drain = asyncio.create_task(self._drain(e['turn_id']))
+            self.tasks.append(t.drain)
+        elif kind == 'quiet':
+            if self.activation and e['quiet_seconds'] >= QUIET_THRESHOLD:
+                self.activation = False
+                await self.stop_ambient()
+                await self.send(type='state', state='standby')  # outside a turn: no turn_id
+        elif kind == 'controls':
+            # Section 12: apply what is valid, then report what the device now has.
+            if type(e.get('muted')) is bool:
+                await self.set_muted(e['muted'])
+            await self.send_controls()  # no `volume`: the jig has no volume to set
+        elif kind == 'client_diagnostics':
+            await self.send({'type': 'client_diagnostics', 'request_id': e['request_id'],
+                'version': _version(), 'build': os.environ.get('ARYA_TEST_BUILD') or 'dev', 'platform': 'arya-test',
+                'diagnostics': {'muted': self.muted, 'activation': self.activation, 'connected': not self.closed}})
+        elif kind == 'countdown' and 'deadline_unix_ms' in e:
+            self.countdowns[e['countdown_id']] = e
+        elif kind == 'countdown_cancel' and self.countdowns.pop(e['countdown_id'], None) is not None:
+            await self.send(type='countdown', countdown_id=e['countdown_id'], ended=True)
+
+    async def send_controls(self):
+        await self.send(type='controls', muted=self.muted)
+
+    async def set_muted(self, muted):
+        """Mute as the device's own control does; unmuting always lands in standby (sections 4 and 12)."""
+        if muted == self.muted:
+            return
+        listening = self.activation
+        self.muted, self.activation = muted, False
+        await self.stop_ambient()
+        if muted and listening:
+            await self.send(type='endpointing', commit=True)  # what was already said is committed
+        if time.monotonic() >= max((t.speaker_until for t in self.turns.values()), default=0):
+            await self.send(type='state', state='standby')  # not while a reply plays: leaving `speaking` is reported at the drain
+
+    async def _show(self, tid, state):
+        t = self.turns[tid]
+        await asyncio.sleep(max(0, t.speaker_until - time.monotonic()))
+        if not self.closed and not t.done and not t.interrupted and not self.muted:
+            await self.send(type='state', turn_id=tid, state=state)
 
     def _audio(self, packet, now):
         assert self.pending_interruption is None, 'audio between interruption and completion'
@@ -268,6 +350,8 @@ class Client:
             tid = e.get('turn_id')
             assert isinstance(tid, str) and tid, f'{kind} missing turn_id'
             t = self.turns.setdefault(tid, Turn())
+            seen = t.started or t.resumed
+            t.started = t.started or kind != 'turn_done'
             # "Reconnecting during a turn": the server opens every turn with
             # `state` then `thinking`, so a resume with no reply text looks on
             # the wire like a turn starting. Only the test that reconnected
@@ -334,9 +418,10 @@ class Client:
                 # turn. A client treats any other value as absent, so that is
                 # what the drain acts on, but sending one is the server's fault.
                 action = e.get('next_action')
-                t.action = action if action in ('listen', 'standby', 'mute') else None
                 if 'next_action' in e:
-                    assert t.action is not None, 'invalid next_action'
+                    assert action in ('listen', 'standby', 'mute'), 'invalid next_action'
+                # Ignore `next_action` on a `turn_done` for a turn the device never saw start.
+                t.action = action if action in ('listen', 'standby', 'mute') and seen else None
                 if t.interrupted or t.failed:
                     assert 'next_action' not in e, 'terminal failure/interruption carries action'
                 if self.pending_interruption == tid:
@@ -359,6 +444,12 @@ class Client:
             assert type(e.get('deadline_unix_ms')) in (int, float)
             assert type(e.get('ring_seconds')) in (int, float) and e['ring_seconds'] > 0
             assert e.get('sound') in ('alarm-1', 'alarm-2', 'alarm-3', 'alarm-4')
+        if kind == 'quiet':
+            assert type(e.get('quiet_seconds')) in (int, float) and e['quiet_seconds'] > 0, 'quiet without quiet_seconds'
+        if kind == 'client_diagnostics':
+            assert isinstance(e.get('request_id'), str) and e['request_id'], 'client_diagnostics without request_id'
+        if kind == 'countdown_cancel':
+            assert isinstance(e.get('countdown_id'), str) and e['countdown_id']
         if kind == 'controls':
             # Section 12: the server sends only the fields to change.
             assert {'muted', 'volume'} & e.keys(), 'controls with nothing to set'
@@ -435,7 +526,9 @@ class Client:
 
     async def utterance(self, text, commit=True):
         assert not self.muted, 'cannot stream microphone while muted'
-        self.activation = True
+        if not self.activation:
+            self.activation = True
+            await self.send(type='state', state='listening')  # outside a turn: no turn_id
         pcm = await speech(text, self.start['input_rate'])
         await self.stop_ambient()
         offset = len(self.events)
@@ -466,12 +559,15 @@ class Client:
         try:
             await asyncio.sleep(max(0, t.speaker_until-time.monotonic()))
             if not self.closed:
+                t.applied = True
                 action = t.action
                 if action in ('standby', 'mute'):
                     self.activation = False
                     await self.stop_ambient()
                 elif action == 'listen' and not self.muted:
                     self.activation = True
+                elif t.interrupted and not t.ours and not self.muted:
+                    self.activation = True  # the person spoke: listen, the continuation follows
                 await self.send(type='state', turn_id=tid,
                                 state='listening' if self.activation and not self.muted else 'standby')
         finally:
