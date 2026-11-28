@@ -20,12 +20,21 @@ def api(url, method='GET', body=None):
         return json.load(response)
 
 
+def pages(path):
+    page = 1
+    while True:
+        items = api(f'{path}?per_page=100&page={page}')
+        yield from items
+        if len(items) < 100:
+            return
+        page += 1
+
+
 body = MARK + '\n' + Path('reports/summary.md').read_text()
-for pull in api(f'/repos/{repo}/commits/{sha}/pulls'):
+for pull in pages(f'/repos/{repo}/commits/{sha}/pulls'):
     if pull['state'] != 'open':
         continue
-    # ponytail: looks at the first 100 comments only; a longer thread gets a new comment per run.
-    comments = api(f"/repos/{repo}/issues/{pull['number']}/comments?per_page=100")
+    comments = pages(f"/repos/{repo}/issues/{pull['number']}/comments")
     old = next((c for c in comments if MARK in c['body']), None)
     if old:
         api(old['url'], 'PATCH', {'body': body})
