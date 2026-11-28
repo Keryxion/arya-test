@@ -572,3 +572,19 @@ async def test_cancelling_a_countdown_it_holds_ends_it():
     assert not c.sent
     await act(c,type='countdown_cancel',countdown_id='c1')
     assert c.sent==[{'type':'countdown','countdown_id':'c1','ended':True}]
+
+
+async def test_late_frames_of_applied_turn_do_not_poison_the_next_turn():
+    c=Wire()
+    await act(c,type='thinking',turn_id='old',tool_calls=0,reasoning_tokens=None)
+    await act(c,type='turn_done',turn_id='old')
+    await asyncio.gather(*c.tasks)
+    sent=list(c.sent)
+    await act(c,type='interrupted',turn_id='old')
+    assert c.pending_interruption is None
+    await act(c,type='speaking',turn_id='old')
+    assert c.sent==sent
+    await act(c,type='thinking',turn_id='new',tool_calls=0,reasoning_tokens=None)
+    await act(c,type='speaking',turn_id='new')
+    c._audio(bytes(960),time.monotonic())
+    assert c.active_audio=='new'

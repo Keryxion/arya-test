@@ -238,6 +238,9 @@ class Client:
     async def _act(self, e):
         """What a conforming device does on receiving a validated server frame."""
         kind = e['type']
+        turn = self.turns.get(e.get('turn_id'))
+        if turn is not None and turn.applied:
+            return
         if kind == 'speaking':
             await self.send(type='state', turn_id=e['turn_id'], state='speaking')
         elif kind == 'state' and e['state'] in ('thinking', 'listening'):
@@ -327,6 +330,9 @@ class Client:
             assert 'wake_word_format' in self.start, 'set_wake_word sent to a device without wake_word_format'
             validate_wake_word(e, self.start['wake_word_format'])
         tid = e.get('turn_id')
+        # Section 4: an applied ending isolates this turn from later activations.
+        if tid in self.turns and self.turns[tid].applied:
+            return
         if self.pending_interruption is not None and tid is not None:
             assert tid == self.pending_interruption and kind == 'turn_done', 'new/old turn frame before interrupted turn completes'
         if tid in self.turns and self.turns[tid].interrupted:
